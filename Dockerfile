@@ -28,7 +28,7 @@ COPY --from=builder /app/build ./build
 COPY package.json pnpm-lock.yaml ./
 
 # Install only production dependencies
-RUN pnpm install --prod --frozen-lockfile --ignore-scripts
+RUN pnpm approve-builds && pnpm install --prod --frozen-lockfile --ignore-scripts
 
 # Expose port 3000 (internal container port)
 EXPOSE 3000
