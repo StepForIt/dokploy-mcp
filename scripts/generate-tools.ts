@@ -63,6 +63,75 @@ function formatTitle(operationId: string): string {
     .join(" ");
 }
 
+// Semantic verb templates for richer tool descriptions.
+// Keys are the lowercased, dash-stripped action part of an operationId.
+// e.g.  "project-create"  ->  resource="project", actionKey="create"
+const VERB_MAP: Record<string, (resource: string) => string> = {
+  create:            (r) => `Create a new Dokploy ${r}`,
+  all:               (r) => `List all ${r}s in Dokploy`,
+  one:               (r) => `Get a single Dokploy ${r} by ID`,
+  get:               (r) => `Get Dokploy ${r} details`,
+  getall:            (r) => `List all ${r}s in Dokploy`,
+  update:            (r) => `Update an existing Dokploy ${r}`,
+  delete:            (r) => `Delete a Dokploy ${r}`,
+  remove:            (r) => `Remove a Dokploy ${r}`,
+  deploy:            (r) => `Deploy a Dokploy ${r}`,
+  redeploy:          (r) => `Redeploy a Dokploy ${r}`,
+  start:             (r) => `Start a Dokploy ${r}`,
+  stop:              (r) => `Stop a Dokploy ${r}`,
+  restart:           (r) => `Restart a Dokploy ${r}`,
+  rebuild:           (r) => `Rebuild a Dokploy ${r}`,
+  reload:            (r) => `Reload a Dokploy ${r}`,
+  search:            (r) => `Search Dokploy ${r}s`,
+  duplicate:         (r) => `Duplicate a Dokploy ${r}`,
+  move:              (r) => `Move a Dokploy ${r} to another environment`,
+  validate:          (r) => `Validate a Dokploy ${r}`,
+  setup:             (r) => `Set up Dokploy ${r}`,
+  canceldeployment:  (r) => `Cancel a running ${r} deployment in Dokploy`,
+  readlogs:          (r) => `Read logs for a Dokploy ${r}`,
+  saveenvironment:   (r) => `Save environment variables for a Dokploy ${r}`,
+  homestats:         (_r) => `Get Dokploy home dashboard statistics`,
+  allforpermissions: (r) => `List all Dokploy ${r}s with permission details`,
+};
+
+/**
+ * Build a human-readable description for a tool.
+ *
+ * Priority:
+ *  1. op.summary  (from OpenAPI spec — rarely populated in Dokploy's spec)
+ *  2. op.description  (same)
+ *  3. Generated from VERB_MAP + operationId parts
+ *  4. Bare "METHOD /path" fallback
+ */
+function formatDescription(
+  operationId: string,
+  method: string,
+  path: string,
+  op: OperationObject,
+): string {
+  if (op.summary) return op.summary.replace(/`/g, "'").replace(/\\/g, "\\\\");
+  if (op.description) return op.description.replace(/`/g, "'").replace(/\\/g, "\\\\");
+
+  const dashIdx = operationId.indexOf("-");
+  if (dashIdx > 0) {
+    const resource = operationId.slice(0, dashIdx);
+    const actionRaw = operationId.slice(dashIdx + 1);
+    const actionKey = actionRaw.replace(/-/g, "").toLowerCase();
+    const template = VERB_MAP[actionKey];
+    if (template) {
+      return `${template(resource)}. ${method.toUpperCase()} ${path}`;
+    }
+    // Fallback: capitalise each word of the action
+    const actionTitle = actionRaw
+      .split("-")
+      .map((w) => w.charAt(0).toUpperCase() + w.slice(1))
+      .join(" ");
+    return `${actionTitle} Dokploy ${resource}. ${method.toUpperCase()} ${path}`;
+  }
+
+  return `${method.toUpperCase()} ${path}`;
+}
+
 function getZodSchema(op: OperationObject, method: string): string {
   if (method === "post" && op.requestBody?.content?.["application/json"]?.schema) {
     const schema = op.requestBody.content["application/json"].schema;
@@ -249,9 +318,7 @@ function main() {
 
       try {
         const zodSchema = getZodSchema(op, method);
-        const description = (op.summary || op.description || `${method.toUpperCase()} ${path}`)
-          .replace(/`/g, "'")
-          .replace(/\\/g, "\\\\");
+        const description = formatDescription(operationId, method, path, op);
         const title = formatTitle(operationId);
         const annotations = deriveAnnotations(method, operationId);
         const tag = op.tags?.[0] || "unknown";
