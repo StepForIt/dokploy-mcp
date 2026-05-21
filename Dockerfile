@@ -8,14 +8,11 @@ RUN corepack enable && corepack prepare pnpm@9.15.0 --activate
 # Copy package and configuration
 COPY package.json pnpm-lock.yaml tsconfig.json ./
 
-# Copy source code and generation scripts
+# Copy source code
 COPY src ./src
-COPY scripts ./scripts
 
-# Install dependencies, regenerate tool descriptions, then compile
-RUN pnpm install --frozen-lockfile && \
-    pnpm run generate && \
-    pnpm run build
+# Install dependencies and build
+RUN pnpm install --frozen-lockfile && pnpm run build
 
 # ----- Production Stage -----
 FROM node:lts-alpine
