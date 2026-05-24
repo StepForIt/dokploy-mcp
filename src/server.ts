@@ -2,6 +2,7 @@ import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { ListToolsRequestSchema } from "@modelcontextprotocol/sdk/types.js";
 import type { ZodObject, ZodRawShape } from "zod";
 import { zodToJsonSchema } from "zod-to-json-schema";
+import { customTools } from "./custom-tools.js";
 import { generatedTools } from "./generated/tools.js";
 import { createHandler } from "./handler.js";
 import { createLogger } from "./utils/logger.js";
@@ -11,10 +12,15 @@ const logger = createLogger("MCP-Server");
 const JSON_SCHEMA_2020_12 = "https://json-schema.org/draft/2020-12/schema";
 
 function getEnabledTools() {
+  // Merge auto-generated tools with hand-written custom ones. Custom tools
+  // exist to work around limitations of the catalog client (e.g. fields stripped
+  // because the parent tool has too many params). See `src/custom-tools.ts`.
+  const allTools = [...generatedTools, ...customTools];
+
   const enabledTags = process.env.DOKPLOY_ENABLED_TAGS;
 
   if (!enabledTags) {
-    return generatedTools;
+    return allTools;
   }
 
   const tags = new Set(
@@ -24,11 +30,11 @@ function getEnabledTools() {
       .filter(Boolean),
   );
 
-  const filtered = generatedTools.filter((tool) => tags.has(tool.tag.toLowerCase()));
+  const filtered = allTools.filter((tool) => tags.has(tool.tag.toLowerCase()));
 
   logger.info("Filtered tools by tags", {
     enabledTags: [...tags],
-    total: generatedTools.length,
+    total: allTools.length,
     loaded: filtered.length,
   });
 
