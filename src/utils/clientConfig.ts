@@ -113,7 +113,7 @@ export function getClientConfig(): Config {
   return ConfigManager.getInstance().getConfig();
 }
 
-function parseBoolean(value: string | undefined, fallback: boolean): boolean {
+export function parseBoolean(value: string | undefined, fallback: boolean): boolean {
   if (value === undefined) return fallback;
   const normalized = value.trim().toLowerCase();
   if (["true", "1", "yes", "on"].includes(normalized)) return true;

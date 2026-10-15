@@ -1,5 +1,117 @@
 import { z } from "zod";
 import type { ToolDefinition } from "./types.js";
+import apiClient from "./utils/apiClient.js";
+import { maskEnvValue } from "./utils/redactSensitive.js";
+import { ENV_KEY_PATTERN, unsetEnvVar, upsertEnvVar } from "./utils/upsertEnv.js";
+
+type EnvResource = "application" | "compose";
+
+const envKey = z.string().regex(ENV_KEY_PATTERN, "Invalid variable name");
+
+const envValue = z
+  .string()
+  .refine((v) => !/[\r\n]/.test(v), "The value must fit on one line")
+  .refine((v) => !v.includes("[REDACTED]"), "The value is a masked placeholder, not a real value");
+
+// Reads the real env server-side. Never rebuild an env from nothing because the read came back in
+// an unexpected shape: that would wipe every other variable.
+async function readEnv(resource: EnvResource, idField: string, id: string): Promise<string | null> {
+  const { data } = await apiClient.get(`/${resource}.one`, { params: { [idField]: id } });
+  const current: unknown = data?.env;
+  if (current !== null && typeof current !== "string") {
+    throw new Error(`Could not read the current env of ${resource} ${id}; nothing was changed`);
+  }
+  return current;
+}
+
+/**
+ * Sets env variables on an application or a compose. With DOKPLOY_REDACT_ENV the client only
+ * ever sees masked envs, so it cannot send back the full `env` that `*-update` expects without
+ * wiping the secrets. This tool reads the real env server-side, rewrites only the given variables
+ * and saves it in one write: the secrets never leave the MCP server and are never overwritten.
+ */
+function envUpsertTool(resource: EnvResource, idField: string): ToolDefinition {
+  return {
+    name: `${resource}-env-upsert`,
+    description: `Set one or more environment variables on a Dokploy ${resource} (add them, or replace their value) without resending the whole env. Every other variable, including masked secrets, is kept as is. \`variables\` maps each name to its value, e.g. {"SMTP_PORT":"587"}; each value is written as-is after \`KEY=\` (quote it if needed, no line breaks). Takes effect at the next deploy.`,
+    tag: resource,
+    method: "POST",
+    path: `/${resource}.update`,
+    schema: z.object({
+      [idField]: z.string().min(1),
+      variables: z
+        .record(envKey, envValue)
+        .refine((v) => Object.keys(v).length > 0, "Give at least one variable"),
+    }),
+    annotations: {
+      title: `Set ${resource} env variables`,
+      idempotentHint: true,
+      destructiveHint: false,
+      openWorldHint: true,
+    },
+    maskInput: (input) => ({
+      ...input,
+      variables: Object.fromEntries(
+        Object.entries((input.variables ?? {}) as Record<string, string>).map(([k, v]) => [
+          k,
+          maskEnvValue(k, String(v)),
+        ]),
+      ),
+    }),
+    run: async (input) => {
+      const id = String(input[idField]);
+      const variables = input.variables as Record<string, string>;
+      let env = await readEnv(resource, idField, id);
+      const actions: Record<string, string> = {};
+      for (const [key, value] of Object.entries(variables)) {
+        const result = upsertEnvVar(env, key, value);
+        env = result.env;
+        actions[key] = result.action;
+      }
+      const changed = Object.values(actions).some((a) => a !== "unchanged");
+      if (changed) {
+        await apiClient.post(`/${resource}.update`, { [idField]: id, env });
+      }
+      return { [idField]: id, actions, redeployRequired: changed, env };
+    },
+  };
+}
+
+/** Removes env variables, same server-side read/rewrite as the upsert. */
+function envUnsetTool(resource: EnvResource, idField: string): ToolDefinition {
+  return {
+    name: `${resource}-env-unset`,
+    description: `Remove one or more environment variables from a Dokploy ${resource} without resending the whole env. Every other variable, including masked secrets, is kept as is. Takes effect at the next deploy.`,
+    tag: resource,
+    method: "POST",
+    path: `/${resource}.update`,
+    schema: z.object({
+      [idField]: z.string().min(1),
+      keys: z.array(envKey).min(1),
+    }),
+    annotations: {
+      title: `Remove ${resource} env variables`,
+      idempotentHint: true,
+      destructiveHint: true,
+      openWorldHint: true,
+    },
+    run: async (input) => {
+      const id = String(input[idField]);
+      let env = await readEnv(resource, idField, id);
+      const actions: Record<string, string> = {};
+      for (const key of input.keys as string[]) {
+        const result = unsetEnvVar(env, key);
+        env = result.env;
+        actions[key] = result.action;
+      }
+      const changed = Object.values(actions).includes("removed");
+      if (changed) {
+        await apiClient.post(`/${resource}.update`, { [idField]: id, env });
+      }
+      return { [idField]: id, actions, redeployRequired: changed, env };
+    },
+  };
+}
 
 /**
  * Custom tools that augment the auto-generated catalog from `src/generated/tools.ts`.
@@ -42,4 +154,8 @@ export const customTools: ToolDefinition[] = [
       openWorldHint: true,
     },
   },
+  envUpsertTool("application", "applicationId"),
+  envUpsertTool("compose", "composeId"),
+  envUnsetTool("application", "applicationId"),
+  envUnsetTool("compose", "composeId"),
 ];

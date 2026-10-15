@@ -76,3 +76,35 @@ describe("MCP server tools/list", () => {
     }
   });
 });
+
+describe("full env overwrite", () => {
+  async function schemaOf(name: string) {
+    const server = createServer();
+    const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
+    await server.connect(serverTransport);
+    const client = new Client({ name: "test-client", version: "1.0.0" });
+    await client.connect(clientTransport);
+    const { tools } = await client.listTools();
+    await client.close();
+    const tool = tools.find((t) => t.name === name);
+    return tool?.inputSchema as { properties?: Record<string, unknown> } | undefined;
+  }
+
+  it("hides `env` from the update tools while secrets are masked", async () => {
+    for (const name of ["application-update", "compose-update"]) {
+      const schema = await schemaOf(name);
+      expect(schema?.properties).toBeDefined();
+      expect(schema?.properties).not.toHaveProperty("env");
+    }
+    expect(await schemaOf("compose-env-upsert")).toBeDefined();
+  });
+
+  it("keeps `env` when masking is turned off", async () => {
+    vi.stubEnv("DOKPLOY_REDACT_ENV", "false");
+    try {
+      expect((await schemaOf("compose-update"))?.properties).toHaveProperty("env");
+    } finally {
+      vi.unstubAllEnvs();
+    }
+  });
+});

@@ -13,17 +13,21 @@ export function createHandler(tool: ToolDefinition) {
     const redact = <T>(value: T): T => (redactEnv ? redactSensitive(value, redactFields) : value);
 
     try {
-      logger.info(`Executing tool: ${tool.name}`, { input: redact(input) });
+      const logged = redactEnv && tool.maskInput ? tool.maskInput(input) : input;
+      logger.info(`Executing tool: ${tool.name}`, { input: redact(logged) });
 
-      const response =
-        tool.method === "GET"
-          ? await apiClient.get(tool.path, { params: input })
-          : await apiClient.post(tool.path, input);
+      let data: unknown;
+      if (tool.run) {
+        data = await tool.run(input);
+      } else {
+        const response =
+          tool.method === "GET"
+            ? await apiClient.get(tool.path, { params: input })
+            : await apiClient.post(tool.path, input);
+        data = response.data;
+      }
 
-      return ResponseFormatter.success(
-        `${tool.name} completed successfully`,
-        redact(response.data),
-      );
+      return ResponseFormatter.success(`${tool.name} completed successfully`, redact(data));
     } catch (error) {
       logger.error(`Tool execution failed: ${tool.name}`, {
         error: error instanceof Error ? error.message : "Unknown error",
