@@ -16,4 +16,8 @@ export interface ToolDefinition {
   path: string;
   schema: ZodObject<ZodRawShape>;
   annotations?: ToolAnnotations;
+  /** Runs the tool itself instead of forwarding the input to `method` + `path`. */
+  run?: (input: Record<string, unknown>) => Promise<unknown>;
+  /** Hides secret inputs from the logs (applied when DOKPLOY_REDACT_ENV is on). */
+  maskInput?: (input: Record<string, unknown>) => Record<string, unknown>;
 }
