@@ -14,6 +14,11 @@ import { createLogger } from "./utils/logger.js";
 const PORT = 3000;
 const logger = createLogger("MCP-HTTP-Server");
 
+// MCP spec (Streamable HTTP): a request carrying a session ID the server no longer knows (it
+// restarted, or the session expired) MUST get a 404, which tells the client to re-initialize.
+// A 400 leaves clients such as claude.ai connectors stuck on a dead session after every redeploy.
+const SESSION_NOT_FOUND = "Session not found: re-initialize";
+
 const jsonrpcError = (code: number, message: string) => ({
   jsonrpc: "2.0" as const,
   error: { code, message },
@@ -71,6 +76,8 @@ export async function main() {
 
       if (sessionId && transports.streamable[sessionId]) {
         transport = transports.streamable[sessionId];
+      } else if (sessionId) {
+        return c.json(jsonrpcError(-32001, SESSION_NOT_FOUND), 404);
       } else if (!sessionId && isInitializeRequest(body)) {
         transport = new StreamableHTTPServerTransport({
           sessionIdGenerator: () => randomUUID(),
@@ -116,8 +123,11 @@ export async function main() {
     const { incoming, outgoing } = c.env;
     const sessionId = c.req.header("mcp-session-id");
 
-    if (!sessionId || !transports.streamable[sessionId]) {
-      return c.json(jsonrpcError(-32000, "Invalid or missing session ID"), 400);
+    if (!sessionId) {
+      return c.json(jsonrpcError(-32000, "Missing session ID"), 400);
+    }
+    if (!transports.streamable[sessionId]) {
+      return c.json(jsonrpcError(-32001, SESSION_NOT_FOUND), 404);
     }
 
     try {
@@ -137,8 +147,11 @@ export async function main() {
     const { incoming, outgoing } = c.env;
     const sessionId = c.req.header("mcp-session-id");
 
-    if (!sessionId || !transports.streamable[sessionId]) {
-      return c.json(jsonrpcError(-32000, "Invalid or missing session ID"), 400);
+    if (!sessionId) {
+      return c.json(jsonrpcError(-32000, "Missing session ID"), 400);
+    }
+    if (!transports.streamable[sessionId]) {
+      return c.json(jsonrpcError(-32001, SESSION_NOT_FOUND), 404);
     }
 
     try {
@@ -193,7 +206,7 @@ export async function main() {
 
       const transport = transports.sse[sessionId];
       if (!transport) {
-        return c.json(jsonrpcError(-32000, "No transport found for sessionId"), 400);
+        return c.json(jsonrpcError(-32001, SESSION_NOT_FOUND), 404);
       }
 
       const body = await c.req.json();
