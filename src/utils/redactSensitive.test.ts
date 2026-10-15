@@ -57,6 +57,24 @@ describe("maskDotenv", () => {
     );
   });
 
+  it("masks opaque blobs and PEM keys under innocent names", () => {
+    const b64Json = Buffer.from(
+      '{\n  "type": "service_account",\n  "private_key": "x"\n}',
+    ).toString("base64");
+    expect(
+      maskDotenv(
+        `FCM_JSON=${b64Json}\nCERTIFICATE=-----BEGIN PRIVATE KEY-----\nRANDOM=a8f3kq92jd83kd02md83kd93ld02kd83`,
+      ),
+    ).toBe(`FCM_JSON=${R}\nCERTIFICATE=${R}\nRANDOM=${R}`);
+    expect(maskDotenv("FCM_SERVICE_ACCOUNT_JSON={}")).toBe(`FCM_SERVICE_ACCOUNT_JSON=${R}`);
+  });
+
+  it("keeps ids, hosts and short values readable", () => {
+    const input =
+      "GOOGLE_CLIENT_ID=655580835360-hmiarc4a65fmv2jkcudtho0vhsgp4sv6.apps.googleusercontent.com\nFIREBASE_PROJECT_ID=artech-1b5a1\nBACKEND_URL=http://backend-symfony:8080";
+    expect(maskDotenv(input)).toBe(input);
+  });
+
   it("masks only the credentials inside a URL", () => {
     expect(
       maskDotenv("DATABASE_URL=postgres://app:pw@db:5432/app\nSENTRY_URL=https://k@o1.ingest.io/2"),
