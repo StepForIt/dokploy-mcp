@@ -71,6 +71,8 @@ const SECRET_NAME_PARTS = [
   "CREDENTIAL",
   "PRIVATE",
   "AUTHORIZATION",
+  "SERVICE_ACCOUNT",
+  "SERVICEACCOUNT",
 ];
 const SECRET_NAME_WORDS = new Set([
   "KEY",
@@ -95,9 +97,15 @@ const SECRET_NAME_WORDS = new Set([
 // A flag such as GOOGLE_AUTH_ENABLED=true leaks nothing, whatever its name.
 const HARMLESS_VALUE = /^\s*["']?(true|false|yes|no|on|off|0|1)["']?\s*$/i;
 
-// Values that are secrets whatever the variable is called.
+// Values that are secrets whatever the variable is called: known key prefixes, PEM blocks.
 const SECRET_VALUE =
-  /^\s*["']?(ghp_|gho_|ghs_|github_pat_|glpat-|sk-|sk_live_|rk_live_|xox[abprs]-|GOCSPX-|AKIA|eyJ[A-Za-z0-9_-]{10,}\.)/;
+  /^\s*["']?(ghp_|gho_|ghs_|github_pat_|glpat-|sk-|sk_live_|rk_live_|xox[abprs]-|GOCSPX-|AKIA|eyJ[A-Za-z0-9_-]{10,}\.|-----BEGIN)/;
+
+// A long opaque blob (random key, base64 of a JSON credentials file…) is a secret even under an
+// innocent name such as FCM_SERVICE_ACCOUNT_JSON. Hosts, URLs, emails and client ids all carry a
+// "." or ":" and stay readable.
+const OPAQUE_VALUE =
+  /^\s*["']?(?=[A-Za-z0-9+/=_-]*[0-9])(?=[A-Za-z0-9+/=_-]*[A-Za-z])[A-Za-z0-9+/=_-]{32,}["']?\s*$/;
 
 // Credentials inside a URL (postgres://user:pass@host, https://key@sentry…): keep the rest.
 const URL_CREDENTIALS = /([a-z][a-z0-9+.-]*:\/\/)[^\s/@]+@/gi;
@@ -110,7 +118,7 @@ export function isSecretName(name: string): boolean {
 
 export function maskEnvValue(name: string, value: string): string {
   if (value.trim() === "") return value;
-  if (SECRET_VALUE.test(value)) return REDACTED_PLACEHOLDER;
+  if (SECRET_VALUE.test(value) || OPAQUE_VALUE.test(value)) return REDACTED_PLACEHOLDER;
   if (isSecretName(name) && !HARMLESS_VALUE.test(value)) return REDACTED_PLACEHOLDER;
   return value.replace(URL_CREDENTIALS, `$1${REDACTED_PLACEHOLDER}@`);
 }
