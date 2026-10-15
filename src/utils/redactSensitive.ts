@@ -42,8 +42,8 @@ export const DEFAULT_REDACTED_FIELDS = [
 
 const REDACTED_PLACEHOLDER = "[REDACTED]";
 
-// Fields holding a dotenv-style string (KEY=value per line): only the values are masked, so
-// the client still sees which variables are set, which are empty, and how they are named.
+// Fields holding a dotenv-style string (KEY=value per line): only secret values are masked, so
+// the client still sees every variable name and the harmless values (hosts, ports, flags).
 const DOTENV_FIELDS = new Set([
   "env",
   "buildargs",
@@ -56,7 +56,64 @@ const DOTENV_FIELDS = new Set([
 // walk into it instead of hiding it, its own secret-bearing fields are still redacted.
 const WALKABLE_FIELDS = new Set(["environment"]);
 
-const DOTENV_LINE = /^(\s*(?:export\s+)?[A-Za-z_][A-Za-z0-9_.-]*\s*=)(.*)$/;
+const DOTENV_LINE = /^(\s*(?:export\s+)?([A-Za-z_][A-Za-z0-9_.-]*)\s*=)(.*)$/;
+
+// A variable is a secret when its name says so (GOOGLE_CLIENT_SECRET, SMTP_PASS, NPM_AUTH,
+// SIRENE_API_KEY…); APP_HOST, SMTP_PORT or ADMIN_EMAILS stay readable. Unambiguous words match
+// anywhere in the name (DBPASSWORD, APISECRET), short ones only as a whole word (KEY, not KEYBOARD).
+const SECRET_NAME_PARTS = [
+  "PASSWORD",
+  "PASSWD",
+  "PASSPHRASE",
+  "SECRET",
+  "TOKEN",
+  "APIKEY",
+  "CREDENTIAL",
+  "PRIVATE",
+  "AUTHORIZATION",
+];
+const SECRET_NAME_WORDS = new Set([
+  "KEY",
+  "KEYS",
+  "PASS",
+  "PWD",
+  "AUTH",
+  "USER",
+  "USERNAME",
+  "LOGIN",
+  "CREDS",
+  "SALT",
+  "COOKIE",
+  "SESSION",
+  "SIGNATURE",
+  "CERT",
+  "DSN",
+  "WEBHOOK",
+  "BEARER",
+]);
+
+// A flag such as GOOGLE_AUTH_ENABLED=true leaks nothing, whatever its name.
+const HARMLESS_VALUE = /^\s*["']?(true|false|yes|no|on|off|0|1)["']?\s*$/i;
+
+// Values that are secrets whatever the variable is called.
+const SECRET_VALUE =
+  /^\s*["']?(ghp_|gho_|ghs_|github_pat_|glpat-|sk-|sk_live_|rk_live_|xox[abprs]-|GOCSPX-|AKIA|eyJ[A-Za-z0-9_-]{10,}\.)/;
+
+// Credentials inside a URL (postgres://user:pass@host, https://key@sentry…): keep the rest.
+const URL_CREDENTIALS = /([a-z][a-z0-9+.-]*:\/\/)[^\s/@]+@/gi;
+
+export function isSecretName(name: string): boolean {
+  const upper = name.toUpperCase();
+  if (SECRET_NAME_PARTS.some((part) => upper.includes(part))) return true;
+  return upper.split(/[^A-Z0-9]+/).some((word) => SECRET_NAME_WORDS.has(word));
+}
+
+export function maskEnvValue(name: string, value: string): string {
+  if (value.trim() === "") return value;
+  if (SECRET_VALUE.test(value)) return REDACTED_PLACEHOLDER;
+  if (isSecretName(name) && !HARMLESS_VALUE.test(value)) return REDACTED_PLACEHOLDER;
+  return value.replace(URL_CREDENTIALS, `$1${REDACTED_PLACEHOLDER}@`);
+}
 
 export function maskDotenv(text: string): string {
   return text
@@ -66,8 +123,8 @@ export function maskDotenv(text: string): string {
       if (trimmed === "" || trimmed.startsWith("#")) return line;
       const m = line.match(DOTENV_LINE);
       if (!m) return REDACTED_PLACEHOLDER;
-      const [, head = "", value = ""] = m;
-      return value.trim() === "" ? head : `${head}${REDACTED_PLACEHOLDER}`;
+      const [, head = "", name = "", value = ""] = m;
+      return `${head}${maskEnvValue(name, value)}`;
     })
     .join("\n");
 }
