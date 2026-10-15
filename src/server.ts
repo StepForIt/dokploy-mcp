@@ -5,17 +5,35 @@ import { zodToJsonSchema } from "zod-to-json-schema";
 import { customTools } from "./custom-tools.js";
 import { generatedTools } from "./generated/tools.js";
 import { createHandler } from "./handler.js";
+import type { ToolDefinition } from "./types.js";
+import { parseBoolean } from "./utils/clientConfig.js";
 import { createLogger } from "./utils/logger.js";
 
 const logger = createLogger("MCP-Server");
 
 const JSON_SCHEMA_2020_12 = "https://json-schema.org/draft/2020-12/schema";
 
+// With masking on, the client only sees [REDACTED] secrets: a full `env` sent back through these
+// tools would overwrite them. `*-env-upsert` / `*-env-unset` change variables server-side instead.
+const FULL_ENV_TOOLS = new Set(["application-update", "compose-update"]);
+
+function withoutFullEnv(tool: ToolDefinition): ToolDefinition {
+  if (!FULL_ENV_TOOLS.has(tool.name) || !("env" in tool.schema.shape)) return tool;
+  return {
+    ...tool,
+    schema: tool.schema.omit({ env: true }),
+    description: `${tool.description}. To change env variables use \`${tool.tag}-env-upsert\` or \`${tool.tag}-env-unset\`.`,
+  };
+}
+
 function getEnabledTools() {
   // Merge auto-generated tools with hand-written custom ones. Custom tools
   // exist to work around limitations of the catalog client (e.g. fields stripped
   // because the parent tool has too many params). See `src/custom-tools.ts`.
-  const allTools = [...generatedTools, ...customTools];
+  const redactEnv = parseBoolean(process.env.DOKPLOY_REDACT_ENV, true);
+  const allTools = [...generatedTools, ...customTools].map((tool) =>
+    redactEnv ? withoutFullEnv(tool) : tool,
+  );
 
   const enabledTags = process.env.DOKPLOY_ENABLED_TAGS;
 

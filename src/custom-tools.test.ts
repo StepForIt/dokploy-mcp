@@ -37,8 +37,7 @@ describe("compose-env-upsert", () => {
 
     const result = await createHandler(tool("compose-env-upsert"))({
       composeId: "c1",
-      key: "SMTP_PORT",
-      value: "587",
+      variables: { SMTP_PORT: "587" },
     });
 
     expect(get).toHaveBeenCalledWith("/compose.one", { params: { composeId: "c1" } });
@@ -54,7 +53,7 @@ describe("compose-env-upsert", () => {
 
   it("does not write when the value is already set", async () => {
     get.mockResolvedValue({ data: { env: "A=1" } });
-    await createHandler(tool("compose-env-upsert"))({ composeId: "c1", key: "A", value: "1" });
+    await createHandler(tool("compose-env-upsert"))({ composeId: "c1", variables: { A: "1" } });
     expect(post).not.toHaveBeenCalled();
   });
 
@@ -62,8 +61,7 @@ describe("compose-env-upsert", () => {
     get.mockResolvedValue({ data: { composeId: "c1" } });
     const result = await createHandler(tool("compose-env-upsert"))({
       composeId: "c1",
-      key: "A",
-      value: "1",
+      variables: { A: "1" },
     });
     expect(post).not.toHaveBeenCalled();
     expect(result.isError).toBe(true);
@@ -79,8 +77,7 @@ describe("application-env-upsert", () => {
 
     await createHandler(tool("application-env-upsert"))({
       applicationId: "a1",
-      key: "NEW_SECRET",
-      value: "abc",
+      variables: { NEW_SECRET: "abc" },
     });
 
     expect(get).toHaveBeenCalledWith("/application.one", { params: { applicationId: "a1" } });
@@ -90,13 +87,92 @@ describe("application-env-upsert", () => {
     });
   });
 
-  it("rejects a masked placeholder and multi-line values", () => {
+  it("rejects a masked placeholder, multi-line values, bad names and empty input", () => {
     const { schema } = tool("application-env-upsert");
-    expect(schema.safeParse({ applicationId: "a1", key: "K", value: "[REDACTED]" }).success).toBe(
-      false,
-    );
-    expect(schema.safeParse({ applicationId: "a1", key: "K", value: "a\nb" }).success).toBe(false);
-    expect(schema.safeParse({ applicationId: "a1", key: "1BAD", value: "x" }).success).toBe(false);
-    expect(schema.safeParse({ applicationId: "a1", key: "K", value: "x" }).success).toBe(true);
+    const ok = (variables: unknown) => schema.safeParse({ applicationId: "a1", variables }).success;
+    expect(ok({ K: "[REDACTED]" })).toBe(false);
+    expect(ok({ K: "a\nb" })).toBe(false);
+    expect(ok({ "1BAD": "x" })).toBe(false);
+    expect(ok({})).toBe(false);
+    expect(ok({ K: "x", L: "y" })).toBe(true);
+    const unset = tool("application-env-unset").schema;
+    expect(unset.safeParse({ applicationId: "a1", keys: [] }).success).toBe(false);
+  });
+});
+
+describe("compose-env-unset", () => {
+  beforeEach(() => {
+    get.mockReset();
+    post.mockReset();
+  });
+
+  it("removes one variable, keeps the secrets in clear on Dokploy, masks them in the reply", async () => {
+    get.mockResolvedValue({ data: { env: "DB_PASSWORD=hunter2\nOLD_FLAG=1" } });
+    post.mockResolvedValue({ data: true });
+
+    const result = await createHandler(tool("compose-env-unset"))({
+      composeId: "c1",
+      keys: ["OLD_FLAG"],
+    });
+
+    expect(post).toHaveBeenCalledWith("/compose.update", {
+      composeId: "c1",
+      env: "DB_PASSWORD=hunter2",
+    });
+    const text = payload(result);
+    expect(text).toContain('"removed"');
+    expect(text).not.toContain("hunter2");
+  });
+
+  it("does not write when the variable is absent", async () => {
+    get.mockResolvedValue({ data: { env: "A=1" } });
+    await createHandler(tool("compose-env-unset"))({ composeId: "c1", keys: ["B"] });
+    expect(post).not.toHaveBeenCalled();
+  });
+
+  it("never rewrites the env when the current one cannot be read", async () => {
+    get.mockResolvedValue({ data: {} });
+    const result = await createHandler(tool("application-env-unset"))({
+      applicationId: "a1",
+      keys: ["A"],
+    });
+    expect(get).toHaveBeenCalledWith("/application.one", { params: { applicationId: "a1" } });
+    expect(post).not.toHaveBeenCalled();
+    expect(result.isError).toBe(true);
+  });
+});
+
+describe("several variables in one call", () => {
+  it("sets several variables with a single write", async () => {
+    get.mockReset();
+    post.mockReset();
+    get.mockResolvedValue({ data: { env: "DB_PASSWORD=hunter2\nA=1" } });
+    post.mockResolvedValue({ data: true });
+
+    const result = await createHandler(tool("compose-env-upsert"))({
+      composeId: "c1",
+      variables: { A: "1", B: "2", C: "3" },
+    });
+
+    expect(post).toHaveBeenCalledTimes(1);
+    expect(post).toHaveBeenCalledWith("/compose.update", {
+      composeId: "c1",
+      env: "DB_PASSWORD=hunter2\nA=1\nB=2\nC=3",
+    });
+    const text = payload(result);
+    expect(text).toContain('"A": "unchanged"');
+    expect(text).toContain('"B": "created"');
+  });
+
+  it("removes several variables with a single write", async () => {
+    get.mockReset();
+    post.mockReset();
+    get.mockResolvedValue({ data: { env: "A=1\nB=2\nC=3" } });
+    post.mockResolvedValue({ data: true });
+
+    await createHandler(tool("compose-env-unset"))({ composeId: "c1", keys: ["A", "C", "Z"] });
+
+    expect(post).toHaveBeenCalledTimes(1);
+    expect(post).toHaveBeenCalledWith("/compose.update", { composeId: "c1", env: "B=2" });
   });
 });

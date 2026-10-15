@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { upsertEnvVar } from "./upsertEnv.js";
+import { unsetEnvVar, upsertEnvVar } from "./upsertEnv.js";
 
 describe("upsertEnvVar", () => {
   it("updates an existing variable in place and keeps every other line", () => {
@@ -46,5 +46,28 @@ describe("upsertEnvVar", () => {
   it("does not touch a multi-line value when updating another variable", () => {
     const env = 'KEY="line1\nOTHER=fake\nline3"\nOTHER=1';
     expect(upsertEnvVar(env, "OTHER", "2").env).toBe('KEY="line1\nOTHER=fake\nline3"\nOTHER=2');
+  });
+});
+
+describe("unsetEnvVar", () => {
+  it("removes the variable and keeps every other line", () => {
+    expect(unsetEnvVar("# db\nDB_PASSWORD=s3cr3t\nOLD_FLAG=1\nPORT=80", "OLD_FLAG")).toEqual({
+      env: "# db\nDB_PASSWORD=s3cr3t\nPORT=80",
+      action: "removed",
+    });
+  });
+
+  it("removes every duplicate and a multi-line value as a whole", () => {
+    const env = 'A=1\nKEY="line1\nline2"\nB=2\nKEY=again';
+    expect(unsetEnvVar(env, "KEY").env).toBe("A=1\nB=2");
+  });
+
+  it("matches the exact name only", () => {
+    expect(unsetEnvVar("API_KEY=x\nKEY=y", "KEY").env).toBe("API_KEY=x");
+  });
+
+  it("reports absent and changes nothing when the variable is missing", () => {
+    expect(unsetEnvVar("A=1\n", "B")).toEqual({ env: "A=1\n", action: "absent" });
+    expect(unsetEnvVar(null, "B")).toEqual({ env: "", action: "absent" });
   });
 });

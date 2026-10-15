@@ -29,29 +29,25 @@ function closesQuote(text: string, quote: string): boolean {
   return false;
 }
 
-/**
- * Sets one variable in a dotenv-style string, leaving every other line untouched (comments,
- * order, other values). The first definition of `key` is rewritten in place, later duplicates
- * are dropped so the new value is the only one Dokploy sees; an unknown key is appended.
- */
-export function upsertEnvVar(
-  env: string | null | undefined,
-  key: string,
-  value: string,
-): UpsertResult {
-  const lines = env ? env.split("\n") : [];
-  const out: string[] = [];
-  let found = false;
-  let changed = false;
+interface EnvBlock {
+  /** Variable name, absent for comments, blank or unparsable lines. */
+  name?: string;
+  prefix: string;
+  lines: string[];
+}
 
+// Splits an env into one block per variable (a multi-line quoted value stays in its block) and
+// one block per other line, so rewriting a block never touches its neighbours.
+function splitEnvBlocks(env: string | null | undefined): EnvBlock[] {
+  const lines = env ? env.split("\n") : [];
+  const blocks: EnvBlock[] = [];
   for (let i = 0; i < lines.length; i++) {
     const line = lines[i] ?? "";
     const m = line.match(ENV_LINE);
     if (!m) {
-      out.push(line);
+      blocks.push({ prefix: "", lines: [line] });
       continue;
     }
-
     const [, prefix = "", name = "", current = ""] = m;
     const block = [line];
     const quote = openQuote(current);
@@ -62,9 +58,28 @@ export function upsertEnvVar(
         if (closesQuote(lines[i] ?? "", quote)) break;
       }
     }
+    blocks.push({ name, prefix, lines: block });
+  }
+  return blocks;
+}
 
-    if (name !== key) {
-      out.push(...block);
+/**
+ * Sets one variable in a dotenv-style string, leaving every other line untouched (comments,
+ * order, other values). The first definition of `key` is rewritten in place, later duplicates
+ * are dropped so the new value is the only one Dokploy sees; an unknown key is appended.
+ */
+export function upsertEnvVar(
+  env: string | null | undefined,
+  key: string,
+  value: string,
+): UpsertResult {
+  const out: string[] = [];
+  let found = false;
+  let changed = false;
+
+  for (const block of splitEnvBlocks(env)) {
+    if (block.name !== key) {
+      out.push(...block.lines);
       continue;
     }
     if (found) {
@@ -72,8 +87,8 @@ export function upsertEnvVar(
       continue;
     }
     found = true;
-    const next = `${prefix}${key}=${value}`;
-    if (block.join("\n") !== next) changed = true;
+    const next = `${block.prefix}${key}=${value}`;
+    if (block.lines.join("\n") !== next) changed = true;
     out.push(next);
   }
 
@@ -84,4 +99,19 @@ export function upsertEnvVar(
   }
 
   return { env: out.join("\n"), action: changed ? "updated" : "unchanged" };
+}
+
+export interface UnsetResult {
+  env: string;
+  action: "removed" | "absent";
+}
+
+/** Removes every definition of `key` (multi-line values included), keeping all other lines. */
+export function unsetEnvVar(env: string | null | undefined, key: string): UnsetResult {
+  const blocks = splitEnvBlocks(env);
+  const kept = blocks.filter((block) => block.name !== key);
+  return {
+    env: kept.flatMap((block) => block.lines).join("\n"),
+    action: kept.length === blocks.length ? "absent" : "removed",
+  };
 }
