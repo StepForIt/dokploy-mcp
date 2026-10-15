@@ -8,6 +8,7 @@ import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/
 import { isInitializeRequest } from "@modelcontextprotocol/sdk/types.js";
 import { Hono } from "hono";
 import { createServer } from "./server.js";
+import { isAuthorized, readAuthToken } from "./utils/httpAuth.js";
 import { createLogger } from "./utils/logger.js";
 
 const PORT = 3000;
@@ -28,6 +29,7 @@ function neverResolve(): Promise<never> {
 }
 
 export async function main() {
+  const authToken = readAuthToken();
   const app = new Hono<{ Bindings: HttpBindings }>();
 
   const transports = {
@@ -37,6 +39,27 @@ export async function main() {
 
   // Health check
   app.get("/health", (c) => c.json({ status: "ok", timestamp: new Date().toISOString() }));
+
+  if (authToken) {
+    app.use("*", async (c, next) => {
+      if (c.req.path === "/health") return next();
+      // Legacy SSE clients post to the /messages URL the server hands them, without the token:
+      // the random sessionId was only issued after an authenticated GET /sse.
+      if (c.req.path === "/messages") {
+        const sid = c.req.query("sessionId");
+        if (sid && transports.sse[sid]) return next();
+      }
+      if (isAuthorized(authToken, c.req.header("authorization"), c.req.query("token"))) {
+        return next();
+      }
+      logger.warn("Rejected unauthenticated request", { path: c.req.path });
+      return c.json(jsonrpcError(-32001, "Unauthorized"), 401);
+    });
+  } else {
+    logger.warn(
+      "MCP_ALLOW_UNAUTHENTICATED=true: HTTP endpoints are open to anyone who can reach them",
+    );
+  }
 
   // Modern Streamable HTTP - POST
   app.post("/mcp", async (c) => {

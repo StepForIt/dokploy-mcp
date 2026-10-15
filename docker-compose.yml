@@ -4,6 +4,8 @@ services:
     container_name: dokploy-mcp-http
     environment:
       - MCP_TRANSPORT=${MCP_TRANSPORT:-http}
+      - MCP_AUTH_TOKEN=${MCP_AUTH_TOKEN}
+      - MCP_ALLOW_UNAUTHENTICATED=${MCP_ALLOW_UNAUTHENTICATED:-false}
       - DOKPLOY_URL=${DOKPLOY_URL:-https://your-dokploy-server.com}
       - DOKPLOY_API_KEY=${DOKPLOY_API_KEY:-your_token_here}
     restart: unless-stopped
