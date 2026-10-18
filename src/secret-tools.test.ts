@@ -302,3 +302,82 @@ describe("env-copy", () => {
     expect(post).not.toHaveBeenCalled();
   });
 });
+
+describe("env-audit-duplicates", () => {
+  afterEach(() => vi.unstubAllEnvs());
+
+  const audited = () =>
+    mockDokploy([
+      project("Vault", "production", [
+        {
+          id: "v1",
+          name: "keys",
+          env: "STRIPE_KEY=sk_live_AAAAAAAAAAAAAAAA1234\nUNIQUE_TOKEN=zzzzzzzzzzzzzzzzzzzz9999",
+        },
+      ]),
+      project("Shop", "production", [
+        {
+          id: "a2",
+          name: "api",
+          env: "# PAYMENT_SECRET src : Vault/production/keys/STRIPE_KEY\nPAYMENT_SECRET=sk_live_AAAAAAAAAAAAAAAA1234\nAPP_HOST=example.com",
+        },
+        {
+          kind: "compose",
+          id: "c1",
+          name: "worker",
+          env: "OLD_STRIPE=sk_live_AAAAAAAAAAAAAAAA9999\nOTHER_PASSWORD=pw1234\nAPP_HOST=example.com",
+        },
+        {
+          id: "a3",
+          name: "admin",
+          env: "ADMIN_PASSWORD=pw1234\nEXTRA_KEY=qqqqqqqqqqXXXXXXXXXXrrrrrrrrrr",
+        },
+      ]),
+    ]);
+
+  it("groups secrets that share a prefix, a suffix or the exact value, without exposing any of it", async () => {
+    vi.stubEnv("DOKPLOY_VAULT_PROJECTS", "Vault");
+    audited();
+    const result = await createHandler(tool("env-audit-duplicates"))({});
+    const text = payload(result);
+    const { groups } = JSON.parse(text).data;
+
+    expect(groups).toHaveLength(2);
+    const [stripe, passwords] = groups;
+    expect(stripe.usages).toBe(3);
+    expect(stripe.matchedBy).toContain("prefix");
+    expect(stripe.distinctValues).toBe(2);
+    expect(stripe.members.map((m: { key: string }) => m.key).sort()).toEqual([
+      "OLD_STRIPE",
+      "PAYMENT_SECRET",
+      "STRIPE_KEY",
+    ]);
+    // the vault copy and the tagged copy are tracked, the worker's is an orphan
+    expect(stripe.orphans).toBe(1);
+    expect(stripe.members.find((m: { key: string }) => m.key === "STRIPE_KEY").inVault).toBe(true);
+    expect(stripe.members.find((m: { key: string }) => m.key === "PAYMENT_SECRET").src).toBe(
+      "Vault/production/keys/STRIPE_KEY",
+    );
+    expect(passwords.matchedBy).toEqual(["exact"]);
+    expect(passwords.usages).toBe(2);
+
+    expect(text).not.toContain("AAAAAAAAAA");
+    expect(text).not.toContain("sk_live");
+    expect(text).not.toContain("pw1234");
+    expect(text).not.toContain("APP_HOST");
+  });
+
+  it("shares a suffix as well as a prefix", async () => {
+    mockDokploy([
+      project("P", "production", [
+        { id: "a1", name: "x", env: "A_TOKEN=aaaaaaaaaa-different-tail-1234567890" },
+        { id: "a2", name: "y", env: "B_TOKEN=bbbbbbbbbb-another-tail-xx1234567890" },
+      ]),
+    ]);
+    const { groups } = JSON.parse(
+      payload(await createHandler(tool("env-audit-duplicates"))({})),
+    ).data;
+    expect(groups).toHaveLength(1);
+    expect(groups[0].matchedBy).toEqual(["suffix"]);
+  });
+});

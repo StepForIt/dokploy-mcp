@@ -1,9 +1,11 @@
 import { z } from "zod";
 import type { ToolDefinition } from "./types.js";
 import { daysUntil, formatExpiry, parseExpiry } from "./utils/envAnnotations.js";
+import { groupBySharedValue, type Occurrence, valueId } from "./utils/envGroups.js";
 import {
   describeEntry,
   type EnvLocation,
+  getVaultProjects,
   type Listed,
   listResources,
   loadInventory,
@@ -144,6 +146,56 @@ function envSetExpiryTool(resource: EnvResourceKind): ToolDefinition {
   };
 }
 
+/** Every secret-looking variable of the given inventory, with what the comparison needs. */
+function secretOccurrences(
+  entries: Awaited<ReturnType<typeof loadInventory>>["entries"],
+): Occurrence[] {
+  return entries.flatMap((entry) => {
+    const annotations = readAnnotations(entry.env);
+    return readEnvVars(entry.env).flatMap((variable) => {
+      const value = unquoteEnvValue(variable.raw);
+      if (value === "" || !looksSecret(variable.name, value)) return [];
+      const notes = annotations.get(variable.name);
+      return [
+        { ...describeEntry(entry), key: variable.name, value, src: notes?.src, exp: notes?.exp },
+      ];
+    });
+  });
+}
+
+function envAuditDuplicatesTool(): ToolDefinition {
+  return {
+    name: "env-audit-duplicates",
+    description:
+      "Find, across ALL projects, the secrets that share the same value or the same first or last 10 characters (a rotated key often keeps its prefix), to tell whether a key is still used and where. Reports per group: usages, distinct values, orphans (copies neither in a vault project nor tagged with their origin) and each location. Never returns a value or a part of it; `valueId` only tells two values apart.",
+    tag: "secrets",
+    method: "GET",
+    path: "/project.all",
+    schema: z.object({}),
+    annotations: { title: "Audit duplicated secrets", ...READ_ONLY },
+    run: async () => {
+      const vaults = new Set(getVaultProjects());
+      const { entries, unreadable } = await loadInventory();
+      const groups = groupBySharedValue(secretOccurrences(entries)).map((group, index) => {
+        const members = group.members.map(({ value, ...member }) => ({
+          ...member,
+          valueId: valueId(value),
+          inVault: vaults.has(member.project),
+        }));
+        return {
+          group: `g${index + 1}`,
+          matchedBy: group.matchedBy,
+          usages: members.length,
+          distinctValues: new Set(members.map((m) => m.valueId)).size,
+          orphans: members.filter((m) => !m.inVault && m.src === undefined).length,
+          members,
+        };
+      });
+      return { groups, unreadable };
+    },
+  };
+}
+
 function findListed(all: Listed[], resource: string, id: string): Listed | undefined {
   return all.find((r) => r.resource === resource && r.id === id);
 }
@@ -229,4 +281,5 @@ export const secretTools: ToolDefinition[] = [
   envSetExpiryTool("application"),
   envSetExpiryTool("compose"),
   envCopyTool(),
+  envAuditDuplicatesTool(),
 ];
