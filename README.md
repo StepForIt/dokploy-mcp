@@ -293,6 +293,7 @@ The configuration on Windows is slightly different compared to Linux or macOS. U
 | `DOKPLOY_RETRY_ATTEMPTS` | No | Number of retry attempts (default: `3`) |
 | `DOKPLOY_RETRY_DELAY` | No | Delay between retries in milliseconds (default: `1000`) |
 | `DOKPLOY_REDACT_ENV` | No | Redacts secret-bearing fields from API responses before they reach the MCP client (default: `true`; set `false` to opt out). In env vars, only secret values are masked: names containing KEY, SECRET, PASSWORD, PASS, TOKEN, AUTH, USER… (`SMTP_PASS=[REDACTED]`), known secret formats (`ghp_`, `sk-`, JWT…) and credentials inside URLs (`postgres://[REDACTED]@db`). Hosts, ports, flags and emails stay readable (`SMTP_PORT=587`). Compose files, tokens and passwords fields are hidden entirely. To change variables without exposing or overwriting the secrets, use `application-env-upsert` / `compose-env-upsert` (set one or more) and `application-env-unset` / `compose-env-unset` (remove one or more): the server reads the real env, rewrites only those variables and saves it. While masking is on, `application-update` / `compose-update` no longer accept a full `env`, which would overwrite the secrets with `[REDACTED]`. |
+| `DOKPLOY_VAULT_PROJECTS` | No | Comma-separated names of the "vault" projects that hold your reusable secrets (e.g. `Vault,Provisioner`). Lets `env-copy` / `env-rotate` take a source with `sourceVault`. See [Managing secrets](#managing-secrets-across-projects). |
 | `DOKPLOY_REDACT_FIELDS` | No | Comma-separated list of response field names to redact when `DOKPLOY_REDACT_ENV=true`. Matched case-insensitively at any nesting depth. Defaults to: `env`, `buildArgs`, `composeFile`, `dockerCompose`, `environment`, `buildSecrets`, `previewBuildSecrets`, `password`, `currentPassword`, `appPassword`, `databasePassword`, `databaseRootPassword`, `redisPassword`, `mariadbPassword`, `mongoPassword`, `mysqlPassword`, `postgresPassword`, `registryPassword`, `token`, `accessToken`, `appToken`, `apiToken`, `botToken`, `refreshToken`, `secret`, `clientSecret`, `apiKey`, `secretAccessKey`, `accessKey`, `licenseKey`, `userKey`, `privateKey`, `privateKeyPass`, `encPrivateKey`, `encPrivateKeyPass`, `sshKey`, `sshPrivateKey`, `customGitSSHKey`, `dockerAuth`. |
 
 For Dokploy instances behind Cloudflare Access or a similar reverse proxy, pass service-token headers with placeholder values like this:
@@ -300,6 +301,58 @@ For Dokploy instances behind Cloudflare Access or a similar reverse proxy, pass 
 ```bash
 DOKPLOY_CUSTOM_HEADERS='{"CF-Access-Client-Id":"your-client-id.access","CF-Access-Client-Secret":"your-client-secret"}'
 ```
+
+## Managing secrets across projects
+
+Keep your keys in one or a few **vault projects**, copy them where they are needed, rotate them in one gesture, and know which ones expire or are still used. **No secret value ever goes through the chat**: values are read and written on the MCP server, replies never contain them (not even a fragment), and errors are filtered.
+
+```
+ Vault project (source of truth)            Consumers (any project, any name)
+ ┌──────────────────────────┐   env-copy    ┌─ Shop/api     PAYMENT_SECRET
+ │ STRIPE_KEY               │ ────────────► ├─ Shop/worker  STRIPE_API_KEY
+ └──────────────────────────┘               └─ Blog/web     STRIPE_KEY
+          │  env-rotate (random, or the value a human typed in the vault)
+          └────────────────► every consumer is updated, then you redeploy them
+```
+
+| Tool | What it does |
+|------|--------------|
+| `env-copy` | Copies a variable to one or more targets (other projects, other names, applications or composes). The copy is frozen. |
+| `env-rotate` | Replaces a secret in the vault and in every consumer. Dry-run unless `confirm: true`. Does **not** redeploy: the reply lists what to redeploy. |
+| `env-audit-duplicates` | Groups the secrets of all projects that share a value or the same first/last 10 characters: how many usages, which are orphans. |
+| `env-expiry-report` | Lists expired, soon-to-expire (`withinDays`, default 30), undated and unreadable-date secrets. |
+| `application-env-set-expiry`, `compose-env-set-expiry` | Sets or removes the expiry date of a variable. |
+
+These tools carry the tag `secrets` (add it to `DOKPLOY_ENABLED_TAGS` if you filter tools). `application-env-set-expiry` / `compose-env-set-expiry` carry the tags `application` / `compose`.
+
+### Comments the tools read and write
+
+Written right above the variable, naming it, so they survive reordering. Dates are `DD/MM/YYYY`.
+
+```
+# STRIPE_KEY exp : 10/12/2026
+# PAYMENT_SECRET src : Vault/production/keys/STRIPE_KEY
+PAYMENT_SECRET=sk_live_...
+```
+
+- `exp`: when the key expires. Read by `env-expiry-report`, set by `*-env-set-expiry`.
+- `src`: where the value was copied from, as `project/environment/resource/VARIABLE` (a `/` or `%` inside a name is written `%2F` / `%25`). Written by `env-copy`; this is how `env-rotate` finds every consumer even when they use another name. Removing a variable also removes its comments.
+
+### Rotating a key
+
+1. Make sure consumers got their value through `env-copy` (so they carry a `src` comment). Older copies can be picked up with `includeUntagged: true` (random mode only: it matches the exact current value) and are tagged by the rotation.
+2. Run `env-rotate` without `confirm` to see what would change, then again with `confirm: true`.
+   - `mode: "random"`: the server generates the value (`length`, `format` hex / base64 / alphanumeric), writes it to the source then to the consumers.
+   - `mode: "from_vault"`: for keys issued by a third party. A human types the new value in the vault variable in Dokploy, then the rotation propagates it. Consumers already up to date are left alone.
+3. Redeploy the resources listed in `redeployRequired` (separately, on purpose).
+
+If the source cannot be written, nothing is propagated. If one consumer fails, the others still go through and the failure is reported.
+
+### Good to know
+
+- `sourceVault` only accepts projects listed in `DOKPLOY_VAULT_PROJECTS`; otherwise give `sourceResource` + `sourceId`.
+- Environments with the same resource name in the same project (e.g. `production` / `staging`) are told apart by the `src` comment, which includes the environment name.
+- Copies made before using these tools have no `src` comment: `env-audit-duplicates` shows them as orphans so you can re-copy them.
 
 ## Transport Modes
 
