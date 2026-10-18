@@ -381,3 +381,180 @@ describe("env-audit-duplicates", () => {
     expect(groups[0].matchedBy).toEqual(["suffix"]);
   });
 });
+
+describe("env-rotate", () => {
+  afterEach(() => {
+    vi.restoreAllMocks();
+    vi.unstubAllEnvs();
+  });
+
+  const SRC = "# {K} src : Vault/production/keys/STRIPE_KEY";
+  const rotating = (vaultEnv = "STRIPE_KEY=OLDVALUE-aaaaaaaaaaaaaaaa") =>
+    mockDokploy([
+      project("Vault", "production", [{ id: "v1", name: "keys", env: vaultEnv }]),
+      project("Shop", "production", [
+        {
+          id: "a2",
+          name: "api",
+          env: `${SRC.replace("{K}", "PAYMENT_SECRET")}\nPAYMENT_SECRET=OLDVALUE-aaaaaaaaaaaaaaaa\nPORT=3000`,
+        },
+        {
+          kind: "compose",
+          id: "c1",
+          name: "worker",
+          env: `${SRC.replace("{K}", "STRIPE_API_KEY")}\nSTRIPE_API_KEY=OLDVALUE-aaaaaaaaaaaaaaaa`,
+        },
+        { id: "a3", name: "legacy", env: "OLD_COPY=OLDVALUE-aaaaaaaaaaaaaaaa" },
+        {
+          id: "a4",
+          name: "other",
+          env: "# X_TOKEN src : Vault/production/keys/ANOTHER_KEY\nX_TOKEN=OLDVALUE-aaaaaaaaaaaaaaaa",
+        },
+      ]),
+    ]);
+  const base = { sourceResource: "application", sourceId: "v1", sourceKey: "STRIPE_KEY" };
+  const writtenEnvs = () =>
+    post.mock.calls.map(([url, body]) => [url, (body as { env: string }).env] as const);
+
+  it("lists the consumers found through their origin tag and writes nothing without confirm", async () => {
+    const logs = captureLogs();
+    rotating();
+    const result = await createHandler(tool("env-rotate"))({ ...base, mode: "random" });
+    const data = JSON.parse(payload(result)).data;
+
+    expect(post).not.toHaveBeenCalled();
+    expect(data.applied).toBe(false);
+    expect(data.targets.map((t: { name: string; key: string }) => `${t.name}:${t.key}`)).toEqual([
+      "api:PAYMENT_SECRET",
+      "worker:STRIPE_API_KEY",
+    ]);
+    expect(payload(result)).not.toContain("OLDVALUE");
+    expect(logs.join("\n")).not.toContain("OLDVALUE");
+  });
+
+  it("can also pick up untagged copies of the same value", async () => {
+    rotating();
+    const data = JSON.parse(
+      payload(
+        await createHandler(tool("env-rotate"))({ ...base, mode: "random", includeUntagged: true }),
+      ),
+    ).data;
+    expect(data.targets.map((t: { name: string }) => t.name)).toEqual(["api", "legacy", "worker"]);
+    expect(data.targets[1].matchedBy).toBe("same-value");
+  });
+
+  it("random: generates the new value on the server, writes it to the vault then to every consumer", async () => {
+    const logs = captureLogs();
+    rotating();
+    const result = await createHandler(tool("env-rotate"))({
+      ...base,
+      mode: "random",
+      length: 32,
+      format: "hex",
+      includeUntagged: true,
+      confirm: true,
+    });
+
+    const posts = writtenEnvs();
+    expect(posts).toHaveLength(4);
+    expect(posts[0]?.[0]).toBe("/application.update"); // the vault first
+    const fresh = posts[0]?.[1].match(/STRIPE_KEY=([0-9a-f]{32})$/)?.[1] as string;
+    expect(fresh).toBeTruthy();
+    for (const [, env] of posts) {
+      expect(env).toContain(fresh);
+      expect(env).not.toContain("OLDVALUE");
+    }
+    // untagged copy is now tracked too
+    expect(posts.find(([, env]) => env.includes("OLD_COPY"))?.[1]).toContain(
+      "# OLD_COPY src : Vault/production/keys/STRIPE_KEY",
+    );
+    const text = payload(result);
+    const data = JSON.parse(text).data;
+    expect(data.applied).toBe(true);
+    expect(data.redeployRequired.map((r: { name: string }) => r.name)).toEqual([
+      "keys",
+      "api",
+      "legacy",
+      "worker",
+    ]);
+    expect(text).not.toContain(fresh);
+    expect(logs.join("\n")).not.toContain(fresh);
+    expect(logs.join("\n")).not.toContain("OLDVALUE");
+  });
+
+  it("from_vault: propagates the value a human set in the vault, skipping copies already up to date", async () => {
+    rotating("STRIPE_KEY=NEWVALUE-bbbbbbbbbbbbbbbb");
+    // the worker already got the new value
+    mockDokploy([
+      project("Vault", "production", [
+        { id: "v1", name: "keys", env: "STRIPE_KEY=NEWVALUE-bbbbbbbbbbbbbbbb" },
+      ]),
+      project("Shop", "production", [
+        {
+          id: "a2",
+          name: "api",
+          env: `${SRC.replace("{K}", "PAYMENT_SECRET")}\nPAYMENT_SECRET=OLDVALUE-aaaa`,
+        },
+        {
+          kind: "compose",
+          id: "c1",
+          name: "worker",
+          env: `${SRC.replace("{K}", "STRIPE_API_KEY")}\nSTRIPE_API_KEY=NEWVALUE-bbbbbbbbbbbbbbbb`,
+        },
+      ]),
+    ]);
+    const result = await createHandler(tool("env-rotate"))({
+      ...base,
+      mode: "from_vault",
+      confirm: true,
+    });
+
+    expect(writtenEnvs()).toEqual([
+      [
+        "/application.update",
+        `${SRC.replace("{K}", "PAYMENT_SECRET")}\nPAYMENT_SECRET=NEWVALUE-bbbbbbbbbbbbbbbb`,
+      ],
+    ]);
+    const data = JSON.parse(payload(result)).data;
+    expect(data.targets.map((t: { action: string }) => t.action)).toEqual(["updated", "unchanged"]);
+    expect(payload(result)).not.toContain("NEWVALUE");
+  });
+
+  it("from_vault cannot look for untagged copies: the old value is gone", async () => {
+    rotating();
+    const result = await createHandler(tool("env-rotate"))({
+      ...base,
+      mode: "from_vault",
+      includeUntagged: true,
+    });
+    expect(result.isError).toBe(true);
+    expect(post).not.toHaveBeenCalled();
+  });
+
+  it("propagates nothing when the vault write fails", async () => {
+    rotating();
+    post.mockRejectedValueOnce(new Error("boom OLDVALUE"));
+    const result = await createHandler(tool("env-rotate"))({
+      ...base,
+      mode: "random",
+      confirm: true,
+    });
+    expect(result.isError).toBe(true);
+    expect(post).toHaveBeenCalledTimes(1);
+    expect(payload(result)).not.toContain("OLDVALUE");
+  });
+
+  it("keeps going when one consumer fails", async () => {
+    rotating();
+    post.mockResolvedValueOnce({ data: true }); // vault
+    post.mockRejectedValueOnce(new Error("boom")); // api
+    const result = await createHandler(tool("env-rotate"))({
+      ...base,
+      mode: "random",
+      confirm: true,
+    });
+    const data = JSON.parse(payload(result)).data;
+    expect(data.targets.map((t: { status: string }) => t.status)).toEqual(["error", "ok"]);
+    expect(post).toHaveBeenCalledTimes(3);
+  });
+});

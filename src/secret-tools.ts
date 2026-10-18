@@ -9,10 +9,22 @@ import {
   type Listed,
   listResources,
   loadInventory,
+  withEnv,
 } from "./utils/envInventory.js";
 import { type EnvResourceKind, ID_FIELD, readEnv, writeEnv } from "./utils/envStore.js";
 import { looksSecret } from "./utils/redactSensitive.js";
-import { putVariable, resolveSource, safeMessage, ToolInputError } from "./utils/secretOps.js";
+import {
+  type Consumer,
+  findConsumers,
+  generateSecret,
+  type PutAction,
+  putVariable,
+  resolveSource,
+  type SecretFormat,
+  type SourceInput,
+  safeMessage,
+  ToolInputError,
+} from "./utils/secretOps.js";
 import {
   ENV_KEY_PATTERN,
   readAnnotations,
@@ -196,6 +208,132 @@ function envAuditDuplicatesTool(): ToolDefinition {
   };
 }
 
+function envRotateTool(): ToolDefinition {
+  return {
+    name: "env-rotate",
+    description:
+      "Rotate a secret everywhere it is used, across ALL projects, WITHOUT the value ever passing through the chat. The source is the reference variable (usually in a vault project). Consumers are the variables tagged `# NAME src : <source>` (written by `env-copy`), whatever their local name; `includeUntagged` also takes untagged copies holding the exact current value (random mode only). Two modes: `random` generates the new value on the server, writes it to the source then to every consumer; `from_vault` propagates the value a human already typed in the source variable in Dokploy (use it for keys issued by a third party). Without `confirm: true` nothing is written: the reply lists what would change. Does NOT redeploy: the reply lists the resources to redeploy.",
+    tag: "secrets",
+    method: "POST",
+    path: "/application.update",
+    schema: z.object({
+      ...sourceShape,
+      mode: z.enum(["random", "from_vault"]),
+      length: z
+        .number()
+        .int()
+        .min(16)
+        .max(256)
+        .optional()
+        .describe("random mode: characters (default 48)"),
+      format: z
+        .enum(["hex", "base64", "alphanumeric"])
+        .optional()
+        .describe("random mode: alphabet (default alphanumeric)"),
+      includeUntagged: z
+        .boolean()
+        .optional()
+        .describe("random mode: also rotate untagged copies holding the current value"),
+      confirm: z.boolean().optional().describe("true to apply; otherwise a dry-run"),
+    }),
+    annotations: {
+      title: "Rotate a secret everywhere",
+      idempotentHint: false,
+      destructiveHint: true,
+      openWorldHint: true,
+    },
+    run: async (input) => {
+      const mode = input.mode as "random" | "from_vault";
+      const includeUntagged = input.includeUntagged === true;
+      if (mode === "from_vault" && includeUntagged) {
+        throw new ToolInputError(
+          "includeUntagged needs the current value, which from_vault has already replaced: use mode random",
+        );
+      }
+      const all = await listResources();
+      const source = await resolveSource(input as unknown as SourceInput, all);
+      const { entries, unreadable } = await withEnv(all);
+      const consumers = findConsumers(entries, source, includeUntagged);
+      const sourceLocation = { ...describeEntry(source.entry), key: source.variable.name };
+      const targetLocation = (c: Consumer) => ({
+        ...describeEntry(c.entry),
+        key: c.key,
+        matchedBy: c.matchedBy,
+      });
+
+      if (input.confirm !== true) {
+        return {
+          applied: false,
+          mode,
+          source: sourceLocation,
+          targets: consumers.map((c) => ({
+            ...targetLocation(c),
+            upToDate: mode === "from_vault" && c.raw === source.variable.raw,
+          })),
+          unreadable,
+          next: "Nothing was written. Call again with confirm: true to apply.",
+        };
+      }
+
+      let newRaw = source.variable.raw;
+      let sourceAction: string = "unchanged";
+      if (mode === "random") {
+        const length = typeof input.length === "number" ? input.length : 48;
+        newRaw = generateSecret(
+          length,
+          (input.format as SecretFormat | undefined) ?? "alphanumeric",
+        );
+        try {
+          sourceAction = await putVariable(
+            source.entry.resource,
+            source.entry.id,
+            source.variable.name,
+            newRaw,
+            null,
+          );
+        } catch {
+          throw new ToolInputError(
+            "Could not write the new value to the source; nothing was changed",
+          );
+        }
+      }
+
+      const targets: Array<
+        ReturnType<typeof targetLocation> & { status: string; action?: PutAction; error?: string }
+      > = [];
+      for (const consumer of consumers) {
+        const { entry, key } = consumer;
+        try {
+          const action = await putVariable(entry.resource, entry.id, key, newRaw, source.ref);
+          targets.push({ ...targetLocation(consumer), status: "ok", action });
+        } catch (error) {
+          targets.push({ ...targetLocation(consumer), status: "error", error: safeMessage(error) });
+        }
+      }
+      const changed = (r: { action?: string }) =>
+        r.action !== undefined && r.action !== "unchanged";
+      const redeployRequired = [
+        ...(changed({ action: sourceAction }) ? [describeEntry(source.entry)] : []),
+        ...targets.filter(changed).map(({ resource, id, name, project, environmentName }) => ({
+          resource,
+          id,
+          name,
+          project,
+          environmentName,
+        })),
+      ];
+      return {
+        applied: true,
+        mode,
+        source: { ...sourceLocation, action: sourceAction },
+        targets,
+        redeployRequired,
+        unreadable,
+      };
+    },
+  };
+}
+
 function findListed(all: Listed[], resource: string, id: string): Listed | undefined {
   return all.find((r) => r.resource === resource && r.id === id);
 }
@@ -282,4 +420,5 @@ export const secretTools: ToolDefinition[] = [
   envSetExpiryTool("compose"),
   envCopyTool(),
   envAuditDuplicatesTool(),
+  envRotateTool(),
 ];

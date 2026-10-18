@@ -1,4 +1,5 @@
-import { refToString, type VarRef } from "./envAnnotations.js";
+import { randomBytes, randomInt } from "node:crypto";
+import { parseRef, refToString, type VarRef } from "./envAnnotations.js";
 import {
   type EnvEntry,
   type EnvLocation,
@@ -7,7 +8,14 @@ import {
   withEnv,
 } from "./envInventory.js";
 import { type EnvResourceKind, readEnv, writeEnv } from "./envStore.js";
-import { type EnvVar, readEnvVars, setEnvAnnotation, upsertEnvVar } from "./upsertEnv.js";
+import {
+  type EnvVar,
+  readAnnotations,
+  readEnvVars,
+  setEnvAnnotation,
+  unquoteEnvValue,
+  upsertEnvVar,
+} from "./upsertEnv.js";
 
 /** An error whose message is safe to show: it never carries a value. */
 export class ToolInputError extends Error {}
@@ -102,4 +110,60 @@ export async function putVariable(
   if (upserted.action === "unchanged" && tagged.action === "unchanged") return "unchanged";
   await writeEnv(resource, id, tagged.env);
   return upserted.action === "unchanged" ? "tagged" : upserted.action;
+}
+
+export type SecretFormat = "hex" | "base64" | "alphanumeric";
+
+const ALPHANUMERIC = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789";
+const BASE64 = `${ALPHANUMERIC}+/`;
+
+/** A random secret of exactly `length` characters, from the OS random source. */
+export function generateSecret(length: number, format: SecretFormat): string {
+  if (format === "hex")
+    return randomBytes(Math.ceil(length / 2))
+      .toString("hex")
+      .slice(0, length);
+  const alphabet = format === "base64" ? BASE64 : ALPHANUMERIC;
+  return Array.from({ length }, () => alphabet[randomInt(alphabet.length)]).join("");
+}
+
+export interface Consumer {
+  entry: EnvEntry;
+  key: string;
+  raw: string;
+  matchedBy: "src" | "same-value";
+}
+
+/**
+ * The variables fed by `source`: those tagged with its origin (whatever their local name), plus,
+ * on request, untagged ones holding exactly its current value.
+ */
+export function findConsumers(
+  entries: EnvEntry[],
+  source: ResolvedSource,
+  includeUntagged: boolean,
+): Consumer[] {
+  const ref = refToString(source.ref);
+  const current = unquoteEnvValue(source.variable.raw);
+  const found: Consumer[] = [];
+  for (const entry of entries) {
+    const annotations = readAnnotations(entry.env);
+    for (const variable of readEnvVars(entry.env)) {
+      if (entry.id === source.entry.id && variable.name === source.variable.name) continue;
+      const src = annotations.get(variable.name)?.src;
+      const parsed = src === undefined ? null : parseRef(src);
+      const consumer = { entry, key: variable.name, raw: variable.raw };
+      if (parsed && refToString(parsed) === ref) {
+        found.push({ ...consumer, matchedBy: "src" });
+      } else if (
+        includeUntagged &&
+        src === undefined &&
+        current !== "" &&
+        unquoteEnvValue(variable.raw) === current
+      ) {
+        found.push({ ...consumer, matchedBy: "same-value" });
+      }
+    }
+  }
+  return found;
 }
