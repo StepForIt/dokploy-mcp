@@ -33,10 +33,9 @@ describe("MCP server tools/list", () => {
     const tools = await getToolList();
     for (const tool of tools) {
       const schema = tool.inputSchema as Record<string, unknown>;
-      expect(
-        schema.$schema,
-        `Tool "${tool.name}" is missing $schema or has wrong draft`,
-      ).toBe("https://json-schema.org/draft/2020-12/schema");
+      expect(schema.$schema, `Tool "${tool.name}" is missing $schema or has wrong draft`).toBe(
+        "https://json-schema.org/draft/2020-12/schema",
+      );
     }
   });
 
@@ -60,7 +59,10 @@ describe("MCP server tools/list", () => {
 
     for (const tool of tools) {
       const found = findNestedSchemaKeys(tool.inputSchema);
-      expect(found, `Tool "${tool.name}" has nested $schema keys at: ${found.join(", ")}`).toHaveLength(0);
+      expect(
+        found,
+        `Tool "${tool.name}" has nested $schema keys at: ${found.join(", ")}`,
+      ).toHaveLength(0);
     }
   });
 
@@ -97,6 +99,8 @@ describe("full env overwrite", () => {
       expect(schema?.properties).not.toHaveProperty("env");
     }
     expect(await schemaOf("compose-env-upsert")).toBeDefined();
+    expect(await schemaOf("env-expiry-report")).toBeDefined();
+    expect(await schemaOf("application-env-set-expiry")).toBeDefined();
   });
 
   it("keeps `env` when masking is turned off", async () => {

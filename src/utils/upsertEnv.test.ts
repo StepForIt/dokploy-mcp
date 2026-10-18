@@ -1,5 +1,11 @@
 import { describe, expect, it } from "vitest";
-import { unsetEnvVar, upsertEnvVar } from "./upsertEnv.js";
+import {
+  readAnnotations,
+  readEnvVars,
+  setEnvAnnotation,
+  unsetEnvVar,
+  upsertEnvVar,
+} from "./upsertEnv.js";
 
 describe("upsertEnvVar", () => {
   it("updates an existing variable in place and keeps every other line", () => {
@@ -69,5 +75,59 @@ describe("unsetEnvVar", () => {
   it("reports absent and changes nothing when the variable is missing", () => {
     expect(unsetEnvVar("A=1\n", "B")).toEqual({ env: "A=1\n", action: "absent" });
     expect(unsetEnvVar(null, "B")).toEqual({ env: "", action: "absent" });
+  });
+});
+
+describe("env annotations", () => {
+  const env = "A=1\n# TOKEN exp : 10/12/2026\nTOKEN=abc\nB=2";
+
+  it("reads the expiry and provenance of each variable", () => {
+    const withSrc = `${env}\n# B src : p/e/r/K\n`;
+    expect(readAnnotations(withSrc).get("TOKEN")).toEqual({ exp: "10/12/2026" });
+    expect(readAnnotations(withSrc).get("B")).toEqual({ src: "p/e/r/K" });
+  });
+
+  it("inserts a new annotation right above the variable", () => {
+    expect(setEnvAnnotation("A=1\nB=2", "B", "exp", "01/01/2027")).toEqual({
+      env: "A=1\n# B exp : 01/01/2027\nB=2",
+      action: "set",
+    });
+  });
+
+  it("updates an existing annotation in place and reports unchanged", () => {
+    expect(setEnvAnnotation(env, "TOKEN", "exp", "11/12/2026").env).toBe(
+      "A=1\n# TOKEN exp : 11/12/2026\nTOKEN=abc\nB=2",
+    );
+    expect(setEnvAnnotation(env, "TOKEN", "exp", "10/12/2026").action).toBe("unchanged");
+  });
+
+  it("removes an annotation with null", () => {
+    expect(setEnvAnnotation(env, "TOKEN", "exp", null)).toEqual({
+      env: "A=1\nTOKEN=abc\nB=2",
+      action: "removed",
+    });
+  });
+
+  it("never touches the value or other lines, multi-line values included", () => {
+    const pem = 'KEY="-----BEGIN\nabc\n-----END"\nOTHER=1';
+    expect(setEnvAnnotation(pem, "KEY", "exp", "01/01/2027").env).toBe(
+      '# KEY exp : 01/01/2027\nKEY="-----BEGIN\nabc\n-----END"\nOTHER=1',
+    );
+  });
+
+  it("refuses to annotate a missing variable", () => {
+    expect(() => setEnvAnnotation("A=1", "NOPE", "exp", "01/01/2027")).toThrow(/NOPE/);
+  });
+
+  it("exposes the raw value of the first definition, quotes and lines kept", () => {
+    expect(readEnvVars('A="x y"\nA=2\nP="l1\nl2"').map((v) => [v.name, v.raw])).toEqual([
+      ["A", '"x y"'],
+      ["P", '"l1\nl2"'],
+    ]);
+  });
+
+  it("drops a variable's annotations when it is unset", () => {
+    expect(unsetEnvVar(env, "TOKEN").env).toBe("A=1\nB=2");
+    expect(unsetEnvVar("# NOTE: keep\nA=1", "A").env).toBe("# NOTE: keep");
   });
 });

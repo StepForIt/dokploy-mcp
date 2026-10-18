@@ -5,6 +5,7 @@ import { zodToJsonSchema } from "zod-to-json-schema";
 import { customTools } from "./custom-tools.js";
 import { generatedTools } from "./generated/tools.js";
 import { createHandler } from "./handler.js";
+import { secretTools } from "./secret-tools.js";
 import type { ToolDefinition } from "./types.js";
 import { parseBoolean } from "./utils/clientConfig.js";
 import { createLogger } from "./utils/logger.js";
@@ -31,7 +32,7 @@ function getEnabledTools() {
   // exist to work around limitations of the catalog client (e.g. fields stripped
   // because the parent tool has too many params). See `src/custom-tools.ts`.
   const redactEnv = parseBoolean(process.env.DOKPLOY_REDACT_ENV, true);
-  const allTools = [...generatedTools, ...customTools].map((tool) =>
+  const allTools = [...generatedTools, ...customTools, ...secretTools].map((tool) =>
     redactEnv ? withoutFullEnv(tool) : tool,
   );
 
