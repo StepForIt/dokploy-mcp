@@ -1,9 +1,16 @@
 import { z } from "zod";
 import type { ToolDefinition } from "./types.js";
 import { daysUntil, formatExpiry, parseExpiry } from "./utils/envAnnotations.js";
-import { describeEntry, type EnvLocation, loadInventory } from "./utils/envInventory.js";
+import {
+  describeEntry,
+  type EnvLocation,
+  type Listed,
+  listResources,
+  loadInventory,
+} from "./utils/envInventory.js";
 import { type EnvResourceKind, ID_FIELD, readEnv, writeEnv } from "./utils/envStore.js";
 import { looksSecret } from "./utils/redactSensitive.js";
+import { putVariable, resolveSource, safeMessage, ToolInputError } from "./utils/secretOps.js";
 import {
   ENV_KEY_PATTERN,
   readAnnotations,
@@ -16,6 +23,22 @@ import {
 // MCP server: no input, reply, log or error of these tools ever carries one.
 
 const envKey = z.string().regex(ENV_KEY_PATTERN, "Invalid variable name");
+
+const resourceKind = z.enum(["application", "compose"]);
+
+// Flat on purpose: clients silently drop nested or rarely used parameters (see custom-tools.ts).
+const sourceShape = {
+  sourceKey: envKey.describe("Name of the variable to read the value from"),
+  sourceResource: resourceKind.optional().describe("Type of the source resource (with sourceId)"),
+  sourceId: z.string().min(1).optional().describe("Id of the source application or compose"),
+  sourceVault: z
+    .string()
+    .min(1)
+    .optional()
+    .describe(
+      "Name of a vault project (DOKPLOY_VAULT_PROJECTS) to find the variable in, instead of sourceResource + sourceId",
+    ),
+};
 
 const READ_ONLY = { readOnlyHint: true, openWorldHint: true } as const;
 
@@ -121,8 +144,89 @@ function envSetExpiryTool(resource: EnvResourceKind): ToolDefinition {
   };
 }
 
+function findListed(all: Listed[], resource: string, id: string): Listed | undefined {
+  return all.find((r) => r.resource === resource && r.id === id);
+}
+
+function envCopyTool(): ToolDefinition {
+  return {
+    name: "env-copy",
+    description:
+      "Copy a variable's value to one or more applications/composes, in any project, under any name, WITHOUT the value ever being shown: it is read and written on the MCP server. Each target gets a normed comment `# NAME src : project/environment/resource/SOURCE_KEY` recording where it came from (used by `env-rotate`). The copy is frozen: later changes of the source are not followed until a rotation. Takes effect at the next deploy of each target. The source is a resource (sourceResource + sourceId) or a vault project (sourceVault).",
+    tag: "secrets",
+    method: "POST",
+    path: "/application.update",
+    schema: z.object({
+      ...sourceShape,
+      targets: z
+        .array(
+          z.object({
+            resource: resourceKind,
+            id: z.string().min(1),
+            key: envKey
+              .optional()
+              .describe("Variable name on the target (default: same as the source)"),
+          }),
+        )
+        .min(1)
+        .max(50),
+    }),
+    annotations: {
+      title: "Copy a variable between projects",
+      idempotentHint: true,
+      destructiveHint: false,
+      openWorldHint: true,
+    },
+    run: async (input) => {
+      const all = await listResources();
+      const source = await resolveSource(
+        input as unknown as Parameters<typeof resolveSource>[0],
+        all,
+      );
+      const targets = input.targets as Array<{
+        resource: EnvResourceKind;
+        id: string;
+        key?: string;
+      }>;
+      const results = [];
+      for (const target of targets) {
+        const key = target.key ?? source.variable.name;
+        const listed = findListed(all, target.resource, target.id);
+        const place = listed ? describeEntry(listed) : { resource: target.resource, id: target.id };
+        try {
+          if (!listed) throw new ToolInputError("Target resource not found");
+          if (listed.id === source.entry.id && key === source.variable.name) {
+            throw new ToolInputError("A variable cannot be copied onto itself");
+          }
+          const action = await putVariable(
+            target.resource,
+            target.id,
+            key,
+            source.variable.raw,
+            source.ref,
+          );
+          results.push({
+            ...place,
+            key,
+            status: "ok",
+            action,
+            redeployRequired: action !== "unchanged",
+          });
+        } catch (error) {
+          results.push({ ...place, key, status: "error", error: safeMessage(error) });
+        }
+      }
+      return {
+        source: { ...describeEntry(source.entry), key: source.variable.name },
+        targets: results,
+      };
+    },
+  };
+}
+
 export const secretTools: ToolDefinition[] = [
   envExpiryReportTool(),
   envSetExpiryTool("application"),
   envSetExpiryTool("compose"),
+  envCopyTool(),
 ];

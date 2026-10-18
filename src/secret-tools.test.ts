@@ -26,7 +26,18 @@ function payload(result: { content: Array<{ type: string; text?: string }> }): s
 }
 
 /** Mocks a Dokploy with the given projects; `envs` maps a resource id to its real env. */
-function mockDokploy(projects: unknown[], envs: Record<string, string | null> = {}) {
+function mockDokploy(projects: unknown[], extraEnvs: Record<string, string | null> = {}) {
+  const envs: Record<string, string | null> = { ...extraEnvs };
+  for (const p of projects as Array<{
+    environments: Array<Record<string, Array<Record<string, unknown>>>>;
+  }>) {
+    for (const e of p.environments) {
+      for (const r of [...(e.applications ?? []), ...(e.compose ?? [])]) {
+        const id = String(r.applicationId ?? r.composeId);
+        if (!(id in envs)) envs[id] = (r.env as string | null | undefined) ?? null;
+      }
+    }
+  }
   get.mockImplementation(async (url: string, opts?: { params?: Record<string, string> }) => {
     if (url === "/project.all") return { data: projects };
     const id = opts?.params?.applicationId ?? opts?.params?.composeId ?? "";
@@ -139,6 +150,155 @@ describe("application-env-set-expiry", () => {
     expect(
       (await handler({ applicationId: "a1", key: "NOPE", expires: "01/01/2027" })).isError,
     ).toBe(true);
+    expect(post).not.toHaveBeenCalled();
+  });
+});
+
+function captureLogs() {
+  const lines: string[] = [];
+  vi.spyOn(console, "error").mockImplementation((...args: unknown[]) => {
+    lines.push(args.map(String).join(" "));
+  });
+  return lines;
+}
+
+const world = () =>
+  mockDokploy(
+    [
+      project("Vault", "production", [
+        { id: "v1", name: "keys", env: "STRIPE_KEY=sk_live_VAULTVALUE\nLABEL=hello" },
+      ]),
+      project("Shop", "production", [
+        { id: "a2", name: "api", env: "PORT=3000" },
+        { kind: "compose", id: "c1", name: "worker", env: "OTHER=1" },
+      ]),
+    ],
+    {},
+  );
+
+describe("env-copy", () => {
+  afterEach(() => {
+    vi.restoreAllMocks();
+    vi.unstubAllEnvs();
+  });
+
+  it("copies a key to several projects under different names, tagging its origin, without leaking it", async () => {
+    const logs = captureLogs();
+    world();
+    const result = await createHandler(tool("env-copy"))({
+      sourceResource: "application",
+      sourceId: "v1",
+      sourceKey: "STRIPE_KEY",
+      targets: [
+        { resource: "application", id: "a2", key: "PAYMENT_SECRET" },
+        { resource: "compose", id: "c1", key: "STRIPE_API_KEY" },
+      ],
+    });
+
+    expect(post).toHaveBeenCalledWith("/application.update", {
+      applicationId: "a2",
+      env: "PORT=3000\n# PAYMENT_SECRET src : Vault/production/keys/STRIPE_KEY\nPAYMENT_SECRET=sk_live_VAULTVALUE",
+    });
+    expect(post).toHaveBeenCalledWith("/compose.update", {
+      composeId: "c1",
+      env: "OTHER=1\n# STRIPE_API_KEY src : Vault/production/keys/STRIPE_KEY\nSTRIPE_API_KEY=sk_live_VAULTVALUE",
+    });
+    const data = JSON.parse(payload(result)).data;
+    expect(data.targets.map((t: { status: string }) => t.status)).toEqual(["ok", "ok"]);
+    expect(payload(result)).not.toContain("VAULTVALUE");
+    expect(logs.join("\n")).not.toContain("VAULTVALUE");
+  });
+
+  it("keeps the source name when a target gives none, and copies quoted or multi-line values as is", async () => {
+    mockDokploy([
+      project("Vault", "production", [
+        { id: "v1", name: "keys", env: 'PEM="-----BEGIN\nabc\n-----END"' },
+      ]),
+      project("Shop", "production", [{ id: "a2", name: "api", env: "" }]),
+    ]);
+    await createHandler(tool("env-copy"))({
+      sourceResource: "application",
+      sourceId: "v1",
+      sourceKey: "PEM",
+      targets: [{ resource: "application", id: "a2" }],
+    });
+    expect(post).toHaveBeenCalledWith("/application.update", {
+      applicationId: "a2",
+      env: '# PEM src : Vault/production/keys/PEM\nPEM="-----BEGIN\nabc\n-----END"',
+    });
+  });
+
+  it("finds the source by vault project and name, only inside a declared vault", async () => {
+    world();
+    const handler = createHandler(tool("env-copy"));
+    const call = {
+      sourceVault: "Vault",
+      sourceKey: "STRIPE_KEY",
+      targets: [{ resource: "application", id: "a2" }],
+    };
+
+    expect((await handler(call)).isError).toBe(true);
+    expect(post).not.toHaveBeenCalled();
+
+    vi.stubEnv("DOKPLOY_VAULT_PROJECTS", "Vault");
+    expect((await handler(call)).isError).toBeUndefined();
+    expect(post).toHaveBeenCalledTimes(1);
+  });
+
+  it("does not write anything when the source variable does not exist", async () => {
+    world();
+    const result = await createHandler(tool("env-copy"))({
+      sourceResource: "application",
+      sourceId: "v1",
+      sourceKey: "NOPE",
+      targets: [{ resource: "application", id: "a2" }],
+    });
+    expect(result.isError).toBe(true);
+    expect(post).not.toHaveBeenCalled();
+  });
+
+  it("reports a failing target without cancelling the others", async () => {
+    world();
+    const result = await createHandler(tool("env-copy"))({
+      sourceResource: "application",
+      sourceId: "v1",
+      sourceKey: "STRIPE_KEY",
+      targets: [
+        { resource: "application", id: "ghost" },
+        { resource: "application", id: "a2" },
+      ],
+    });
+    const data = JSON.parse(payload(result)).data;
+    expect(data.targets.map((t: { status: string }) => t.status)).toEqual(["error", "ok"]);
+    expect(post).toHaveBeenCalledTimes(1);
+  });
+
+  it("is idempotent: copying again changes nothing", async () => {
+    mockDokploy([
+      project("Vault", "production", [{ id: "v1", name: "keys", env: "K=v" }]),
+      project("Shop", "production", [
+        { id: "a2", name: "api", env: "# K src : Vault/production/keys/K\nK=v" },
+      ]),
+    ]);
+    const result = await createHandler(tool("env-copy"))({
+      sourceResource: "application",
+      sourceId: "v1",
+      sourceKey: "K",
+      targets: [{ resource: "application", id: "a2" }],
+    });
+    expect(post).not.toHaveBeenCalled();
+    expect(JSON.parse(payload(result)).data.targets[0].action).toBe("unchanged");
+  });
+
+  it("refuses to copy a variable onto itself", async () => {
+    world();
+    const result = await createHandler(tool("env-copy"))({
+      sourceResource: "application",
+      sourceId: "v1",
+      sourceKey: "STRIPE_KEY",
+      targets: [{ resource: "application", id: "v1" }],
+    });
+    expect(JSON.parse(payload(result)).data.targets[0].status).toBe("error");
     expect(post).not.toHaveBeenCalled();
   });
 });

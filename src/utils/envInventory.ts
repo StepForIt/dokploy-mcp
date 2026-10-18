@@ -17,7 +17,7 @@ export interface EnvEntry extends EnvLocation {
 }
 
 // `env` is undefined when the project listing did not carry it, to be read one by one.
-type Listed = Omit<EnvEntry, "env"> & { env: string | null | undefined };
+export type Listed = Omit<EnvEntry, "env"> & { env: string | null | undefined };
 
 type Raw = Record<string, unknown>;
 
@@ -63,14 +63,19 @@ function flatten(projects: Raw[]): Listed[] {
   });
 }
 
-/**
- * Every application and compose of every project with its real env. `unreadable` lists the
- * resources whose env could not be read (location only, never the error text which could echo
- * a value).
- */
-export async function loadInventory(): Promise<{ entries: EnvEntry[]; unreadable: EnvLocation[] }> {
+/** Every application and compose of every project, without reading their env yet. */
+export async function listResources(): Promise<Listed[]> {
   const { data } = await apiClient.get("/project.all");
-  const all = flatten(list(data));
+  return flatten(list(data));
+}
+
+/**
+ * Reads the real env of the given resources. `unreadable` lists those whose env could not be
+ * read (location only, never the error text which could echo a value).
+ */
+export async function withEnv(
+  all: Listed[],
+): Promise<{ entries: EnvEntry[]; unreadable: EnvLocation[] }> {
   const entries: EnvEntry[] = [];
   const unreadable: EnvLocation[] = [];
 
@@ -89,6 +94,11 @@ export async function loadInventory(): Promise<{ entries: EnvEntry[]; unreadable
   const order = new Map(all.map((e, idx) => [e.id, idx]));
   entries.sort((a, b) => (order.get(a.id) ?? 0) - (order.get(b.id) ?? 0));
   return { entries, unreadable };
+}
+
+/** Every application and compose of every project with its real env. */
+export async function loadInventory(): Promise<{ entries: EnvEntry[]; unreadable: EnvLocation[] }> {
+  return withEnv(await listResources());
 }
 
 export function describeEntry(entry: EnvLocation): EnvLocation {
