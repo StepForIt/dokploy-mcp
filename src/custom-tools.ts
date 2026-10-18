@@ -1,10 +1,8 @@
 import { z } from "zod";
 import type { ToolDefinition } from "./types.js";
-import apiClient from "./utils/apiClient.js";
+import { type EnvResourceKind as EnvResource, readEnv, writeEnv } from "./utils/envStore.js";
 import { maskEnvValue } from "./utils/redactSensitive.js";
 import { ENV_KEY_PATTERN, unsetEnvVar, upsertEnvVar } from "./utils/upsertEnv.js";
-
-type EnvResource = "application" | "compose";
 
 const envKey = z.string().regex(ENV_KEY_PATTERN, "Invalid variable name");
 
@@ -12,17 +10,6 @@ const envValue = z
   .string()
   .refine((v) => !/[\r\n]/.test(v), "The value must fit on one line")
   .refine((v) => !v.includes("[REDACTED]"), "The value is a masked placeholder, not a real value");
-
-// Reads the real env server-side. Never rebuild an env from nothing because the read came back in
-// an unexpected shape: that would wipe every other variable.
-async function readEnv(resource: EnvResource, idField: string, id: string): Promise<string | null> {
-  const { data } = await apiClient.get(`/${resource}.one`, { params: { [idField]: id } });
-  const current: unknown = data?.env;
-  if (current !== null && typeof current !== "string") {
-    throw new Error(`Could not read the current env of ${resource} ${id}; nothing was changed`);
-  }
-  return current;
-}
 
 /**
  * Sets env variables on an application or a compose. With DOKPLOY_REDACT_ENV the client only
@@ -61,7 +48,7 @@ function envUpsertTool(resource: EnvResource, idField: string): ToolDefinition {
     run: async (input) => {
       const id = String(input[idField]);
       const variables = input.variables as Record<string, string>;
-      let env = await readEnv(resource, idField, id);
+      let env = await readEnv(resource, id);
       const actions: Record<string, string> = {};
       for (const [key, value] of Object.entries(variables)) {
         const result = upsertEnvVar(env, key, value);
@@ -70,7 +57,7 @@ function envUpsertTool(resource: EnvResource, idField: string): ToolDefinition {
       }
       const changed = Object.values(actions).some((a) => a !== "unchanged");
       if (changed) {
-        await apiClient.post(`/${resource}.update`, { [idField]: id, env });
+        await writeEnv(resource, id, env ?? "");
       }
       return { [idField]: id, actions, redeployRequired: changed, env };
     },
@@ -97,7 +84,7 @@ function envUnsetTool(resource: EnvResource, idField: string): ToolDefinition {
     },
     run: async (input) => {
       const id = String(input[idField]);
-      let env = await readEnv(resource, idField, id);
+      let env = await readEnv(resource, id);
       const actions: Record<string, string> = {};
       for (const key of input.keys as string[]) {
         const result = unsetEnvVar(env, key);
@@ -106,7 +93,7 @@ function envUnsetTool(resource: EnvResource, idField: string): ToolDefinition {
       }
       const changed = Object.values(actions).includes("removed");
       if (changed) {
-        await apiClient.post(`/${resource}.update`, { [idField]: id, env });
+        await writeEnv(resource, id, env ?? "");
       }
       return { [idField]: id, actions, redeployRequired: changed, env };
     },

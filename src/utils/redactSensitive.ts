@@ -123,6 +123,11 @@ export function maskEnvValue(name: string, value: string): string {
   return value.replace(URL_CREDENTIALS, `$1${REDACTED_PLACEHOLDER}@`);
 }
 
+/** True when the reply to a client would hide this value (a secret by name, format or blob). */
+export function looksSecret(name: string, value: string): boolean {
+  return maskEnvValue(name, value).includes(REDACTED_PLACEHOLDER);
+}
+
 export function maskDotenv(text: string): string {
   return text
     .split("\n")
