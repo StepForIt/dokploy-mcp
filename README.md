@@ -357,6 +357,8 @@ If the source cannot be written, nothing is propagated. If one consumer fails, t
 
 ## Moving secrets out of Dokploy into HashiCorp Vault
 
+> Full security plan (VPN for the panel and SSH, Vault, leak containment, detection): [`docs/securite-dokploy.md`](docs/securite-dokploy.md).
+
 Since Dokploy 0.30, an env variable can hold a **reference** to a secrets provider instead of a value: `${{vault.<provider>.<path>:<KEY>}}` is resolved at deploy time and the value never sits in the Dokploy database. Dokploy only reads the vault; `env-migrate-to-vault` is the writer that moves what Dokploy holds today, **one way**, with no value ever going through the chat.
 
 ```
