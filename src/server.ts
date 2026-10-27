@@ -9,6 +9,7 @@ import { secretTools } from "./secret-tools.js";
 import type { ToolDefinition } from "./types.js";
 import { parseBoolean } from "./utils/clientConfig.js";
 import { createLogger } from "./utils/logger.js";
+import { vaultTools } from "./vault-tools.js";
 
 const logger = createLogger("MCP-Server");
 
@@ -32,7 +33,7 @@ function getEnabledTools() {
   // exist to work around limitations of the catalog client (e.g. fields stripped
   // because the parent tool has too many params). See `src/custom-tools.ts`.
   const redactEnv = parseBoolean(process.env.DOKPLOY_REDACT_ENV, true);
-  const allTools = [...generatedTools, ...customTools, ...secretTools].map((tool) =>
+  const allTools = [...generatedTools, ...customTools, ...secretTools, ...vaultTools].map((tool) =>
     redactEnv ? withoutFullEnv(tool) : tool,
   );
 

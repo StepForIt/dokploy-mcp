@@ -294,6 +294,7 @@ The configuration on Windows is slightly different compared to Linux or macOS. U
 | `DOKPLOY_RETRY_DELAY` | No | Delay between retries in milliseconds (default: `1000`) |
 | `DOKPLOY_REDACT_ENV` | No | Redacts secret-bearing fields from API responses before they reach the MCP client (default: `true`; set `false` to opt out). In env vars, only secret values are masked: names containing KEY, SECRET, PASSWORD, PASS, TOKEN, AUTH, USER… (`SMTP_PASS=[REDACTED]`), known secret formats (`ghp_`, `sk-`, JWT…) and credentials inside URLs (`postgres://[REDACTED]@db`). Hosts, ports, flags and emails stay readable (`SMTP_PORT=587`). Compose files, tokens and passwords fields are hidden entirely. To change variables without exposing or overwriting the secrets, use `application-env-upsert` / `compose-env-upsert` (set one or more) and `application-env-unset` / `compose-env-unset` (remove one or more): the server reads the real env, rewrites only those variables and saves it. While masking is on, `application-update` / `compose-update` no longer accept a full `env`, which would overwrite the secrets with `[REDACTED]`. |
 | `DOKPLOY_VAULT_PROJECTS` | No | Comma-separated names of the "vault" projects that hold your reusable secrets (e.g. `Vault,Provisioner`). Lets `env-copy` / `env-rotate` take a source with `sourceVault`. See [Managing secrets](#managing-secrets-across-projects). |
+| `VAULT_ADDR`, `VAULT_TOKEN`, `VAULT_NAMESPACE` | No | Write access to a HashiCorp Vault / OpenBao (KV v2) for `env-migrate-to-vault`: the server address, a token allowed to read and write the paths it fills (`create`, `update`, `read` on `<mount>/data/*`), and an optional namespace. See [Moving secrets out of Dokploy](#moving-secrets-out-of-dokploy-into-hashicorp-vault). |
 | `DOKPLOY_REDACT_FIELDS` | No | Comma-separated list of response field names to redact when `DOKPLOY_REDACT_ENV=true`. Matched case-insensitively at any nesting depth. Defaults to: `env`, `buildArgs`, `composeFile`, `dockerCompose`, `environment`, `buildSecrets`, `previewBuildSecrets`, `password`, `currentPassword`, `appPassword`, `databasePassword`, `databaseRootPassword`, `redisPassword`, `mariadbPassword`, `mongoPassword`, `mysqlPassword`, `postgresPassword`, `registryPassword`, `token`, `accessToken`, `appToken`, `apiToken`, `botToken`, `refreshToken`, `secret`, `clientSecret`, `apiKey`, `secretAccessKey`, `accessKey`, `licenseKey`, `userKey`, `privateKey`, `privateKeyPass`, `encPrivateKey`, `encPrivateKeyPass`, `sshKey`, `sshPrivateKey`, `customGitSSHKey`, `dockerAuth`. |
 
 For Dokploy instances behind Cloudflare Access or a similar reverse proxy, pass service-token headers with placeholder values like this:
@@ -353,6 +354,34 @@ If the source cannot be written, nothing is propagated. If one consumer fails, t
 - `sourceVault` only accepts projects listed in `DOKPLOY_VAULT_PROJECTS`; otherwise give `sourceResource` + `sourceId`.
 - Environments with the same resource name in the same project (e.g. `production` / `staging`) are told apart by the `src` comment, which includes the environment name.
 - Copies made before using these tools have no `src` comment: `env-audit-duplicates` shows them as orphans so you can re-copy them.
+
+## Moving secrets out of Dokploy into HashiCorp Vault
+
+Since Dokploy 0.30, an env variable can hold a **reference** to a secrets provider instead of a value: `${{vault.<provider>.<path>:<KEY>}}` is resolved at deploy time and the value never sits in the Dokploy database. Dokploy only reads the vault; `env-migrate-to-vault` is the writer that moves what Dokploy holds today, **one way**, with no value ever going through the chat.
+
+```
+ Dokploy compose "app"                              HashiCorp Vault (KV v2, mount `secret`)
+ AI_API_KEY=sk-live-…          env-migrate-to-vault   secret/wappe/app/app
+ SMTP_PASS="p@ss"             ───────────────────►    AI_API_KEY = sk-live-…
+                                                      SMTP_PASS  = p@ss
+ AI_API_KEY=${{vault.wappe.wappe/app/app:AI_API_KEY}}   ◄── Dokploy now holds references only
+ SMTP_PASS=${{vault.wappe.wappe/app/app:SMTP_PASS}}
+```
+
+1. In Dokploy, declare the provider (Settings → Secrets → HashiCorp Vault / OpenBao), test it and **assign it to the project**; otherwise the next deploy fails with a clear error.
+2. Give the MCP server its own write token (`VAULT_ADDR`, `VAULT_TOKEN`), scoped to the paths it fills; the Dokploy provider keeps its read-only token.
+3. Run `env-migrate-to-vault` without `confirm` on one resource (`provider`, `resource` + `id`) or a project (`provider`, `project`, optional `environmentName`): the reply lists each variable and the reference it would get.
+4. Run it again with `confirm: true`, then redeploy what `redeployRequired` lists.
+
+| Option | Effect |
+|--------|--------|
+| default | only secret-looking variables move (same rule as the masking); the rest stays readable in Dokploy |
+| `includeNonSecret: true` | every variable moves |
+| `keys: [...]` | only those variables, secret or not |
+| `path` | KV path under the provider's mount for one resource (default `<project>/<environment>/<resource>`, lowercased) |
+| `overwrite: true` | replace a field the vault already holds with a different value; otherwise that key is reported as `conflict` and stays in Dokploy |
+
+What is never touched: variables already holding a `${{…}}` reference, empty values, other fields of the same vault path (the secret is merged, with check-and-set so a concurrent write fails instead of being lost). If the vault write fails, Dokploy is untouched; if the Dokploy write fails after the vault write, the reply says so and calling again is safe. Rotating a migrated secret is then done in the vault, followed by a redeploy.
 
 ## Transport Modes
 
